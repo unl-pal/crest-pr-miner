@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -171,56 +172,6 @@ def _pr_matches(pr, args) -> bool:
 # ---------------------------------------------------------------------------
 # Download functions
 # ---------------------------------------------------------------------------
-def _pr_to_dict(pr) -> dict:
-    """Serialize a PullRequest object to a plain dict (JSON-serialisable)."""
-    def _user(u):
-        if u is None:
-            return None
-        return {"login": u.login, "id": u.id, "type": getattr(u, "type", None)}
-
-    def _label(lb):
-        return {"name": lb.name, "color": lb.color}
-
-    return {
-        "id": pr.id,
-        "number": pr.number,
-        "state": pr.state,
-        "title": pr.title,
-        "body": pr.body,
-        "html_url": pr.html_url,
-        "diff_url": pr.diff_url,
-        "patch_url": pr.patch_url,
-        "created_at": pr.created_at.isoformat() if pr.created_at else None,
-        "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
-        "closed_at": pr.closed_at.isoformat() if pr.closed_at else None,
-        "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
-        "merge_commit_sha": pr.merge_commit_sha,
-        "user": _user(pr.user),
-        "merged_by": _user(pr.merged_by),
-        "assignees": [_user(a) for a in pr.assignees],
-        "labels": [_label(lb) for lb in pr.labels],
-        "draft": pr.draft,
-        "merged": pr.merged,
-        "mergeable": pr.mergeable,
-        "additions": pr.additions,
-        "deletions": pr.deletions,
-        "changed_files": pr.changed_files,
-        "comments": pr.comments,
-        "review_comments": pr.review_comments,
-        "commits": pr.commits,
-        "head": {
-            "sha": pr.head.sha,
-            "ref": pr.head.ref,
-            "label": pr.head.label,
-        },
-        "base": {
-            "sha": pr.base.sha,
-            "ref": pr.base.ref,
-            "label": pr.base.label,
-        },
-    }
-
-
 def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
     """Download PR JSON and diff into pr_dir."""
     pr_dir.mkdir(parents=True, exist_ok=True)
@@ -230,8 +181,7 @@ def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
     diff_path = pr_dir / f"{pr_id}.diff"
 
     if not json_path.exists():
-        data = _pr_to_dict(pr)
-        json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        json_path.write_text(json.dumps(pr.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved %s", json_path)
 
     if not diff_path.exists():
@@ -267,16 +217,7 @@ def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
         review_path = reviews_dir / f"{review.id}.json"
         if review_path.exists():
             continue
-        data = {
-            "id": review.id,
-            "user": {"login": review.user.login, "id": review.user.id} if review.user else None,
-            "body": review.body,
-            "state": review.state,
-            "submitted_at": review.submitted_at.isoformat() if review.submitted_at else None,
-            "commit_id": review.commit_id,
-            "html_url": review.html_url,
-        }
-        review_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        review_path.write_text(json.dumps(review.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved %s", review_path)
 
 
@@ -295,22 +236,7 @@ def download_comments(pool: TokenPool, pr, comments_dir: Path):
         comment_path = comments_dir / f"{comment.id}.json"
         if comment_path.exists():
             continue
-        data = {
-            "id": comment.id,
-            "user": {"login": comment.user.login, "id": comment.user.id} if comment.user else None,
-            "body": comment.body,
-            "created_at": comment.created_at.isoformat() if comment.created_at else None,
-            "updated_at": comment.updated_at.isoformat() if comment.updated_at else None,
-            "html_url": comment.html_url,
-            "path": comment.path,
-            "position": comment.position,
-            "original_position": comment.original_position,
-            "commit_id": comment.commit_id,
-            "original_commit_id": comment.original_commit_id,
-            "diff_hunk": comment.diff_hunk,
-            "pull_request_review_id": comment.pull_request_review_id,
-        }
-        comment_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        comment_path.write_text(json.dumps(comment.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved %s", comment_path)
 
 
@@ -373,6 +299,85 @@ def backfill_comments(pool: TokenPool, args):
             download_comments(pool, pr, comments_dir)
         except GithubException as exc:
             logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
+
+
+# ---------------------------------------------------------------------------
+# Search-based scraping (no explicit repos given)
+# ---------------------------------------------------------------------------
+def scrape_via_search(pool: TokenPool, args):
+    """Use the GitHub search API to find PRs matching the configured filters."""
+    # Build search query
+    query_parts = ["is:pr"]
+
+    # Keyword filter: search for any keyword in the title/body
+    keyword_clause = " OR ".join(f'"{kw}"' for kw in args.keywords)
+    query_parts.append(f"({keyword_clause})")
+
+    # Date filter
+    if args.opened_before:
+        date_str = args.opened_before.strftime("%Y-%m-%d")
+        query_parts.append(f"created:<={date_str}")
+
+    # Language filter
+    if args.languages:
+        lang_clause = " OR ".join(f"language:{lang}" for lang in sorted(args.languages))
+        query_parts.append(f"({lang_clause})")
+
+    query = " ".join(query_parts)
+    logger.info("Searching GitHub with query: %s", query)
+
+    def _search(client, q):
+        return client.search_issues(query=q, sort="created", order="desc")
+
+    try:
+        results = _call_with_retry(pool, _search, query)
+    except GithubException as exc:
+        logger.error("Search failed: %s", exc)
+        return
+
+    for issue in results:
+        if issue.pull_request is None:
+            continue
+
+        repo_full_name = issue.repository.full_name
+        owner, _, repo_name = repo_full_name.partition("/")
+        pr_number = issue.number
+
+        pr_dir = DATA_ROOT / owner / repo_name / str(pr_number)
+        json_path = pr_dir / f"{pr_number}.json"
+
+        if not json_path.exists():
+            try:
+                def _get_pr(client, rfn, pn):
+                    return client.get_repo(rfn).get_pull(pn)
+                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
+            except GithubException as exc:
+                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
+                continue
+
+            if not _pr_matches(pr, args):
+                continue
+
+            download_pr(pool, repo_full_name, pr, pr_dir)
+        else:
+            logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr_number)
+            try:
+                def _get_pr(client, rfn, pn):
+                    return client.get_repo(rfn).get_pull(pn)
+                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
+            except GithubException as exc:
+                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
+                continue
+
+        if args.reviews:
+            reviews_dir = pr_dir / "reviews"
+            if not reviews_dir.exists():
+                download_reviews(pool, pr, reviews_dir)
+
+        if args.comments:
+            comments_dir = pr_dir / "comments"
+            if not comments_dir.exists():
+                download_comments(pool, pr, comments_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -565,25 +570,30 @@ def main(argv=None):
         )
         sys.exit(1)
 
+    # Validate token format: must start with "ghp_" followed by 36 alphanumeric chars
+    _token_re = re.compile(r'^ghp_[A-Za-z0-9]{36}$')
+    invalid = [t for t in tokens if not _token_re.match(t)]
+    if invalid:
+        logger.error(
+            "Invalid GitHub token(s) detected (expected ghp_ + 36 alphanumeric chars): %s",
+            ", ".join(invalid),
+        )
+        sys.exit(1)
+
     pool = TokenPool(tokens)
 
-    backfill_only = not args.repos
-
-    if backfill_only:
-        if not args.reviews and not args.comments:
-            logger.error("No repositories specified and no backfill flag provided.")
-            sys.exit(1)
-        if args.reviews:
-            backfill_reviews(pool, args)
-        if args.comments:
-            backfill_comments(pool, args)
+    if not args.repos:
+        if args.reviews or args.comments:
+            # Backfill-only mode: walk existing data
+            if args.reviews:
+                backfill_reviews(pool, args)
+            if args.comments:
+                backfill_comments(pool, args)
+        else:
+            # No repos and no backfill flags: use GitHub search API
+            scrape_via_search(pool, args)
     else:
         scrape_repos(pool, args.repos, args)
-        # Also do backfill if flags are set
-        if args.reviews:
-            backfill_reviews(pool, args)
-        if args.comments:
-            backfill_comments(pool, args)
 
 
 if __name__ == "__main__":
