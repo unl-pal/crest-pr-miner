@@ -147,6 +147,10 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Downloaded PR data
+data/*
+!data/.gitkeep
+
 # Environments
 .env
 .envrc
