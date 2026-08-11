@@ -162,8 +162,7 @@ def _pr_matches(pr, args) -> bool:
     participants = _participants(pr)
     if len(participants) < args.min_participants:
         return False
-    if not any(not (p.login.endswith("[bot]") or getattr(p, "type", "") == "Bot")
-               for p in participants):
+    if not any(not (p.login.endswith("[bot]") or getattr(p, "type", "") == "Bot") for p in participants):
         return False
 
     return True
