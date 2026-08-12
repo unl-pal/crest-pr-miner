@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from github import Github, RateLimitExceededException, GithubException
+from github import Auth, Github, RateLimitExceededException, GithubException
 
 load_dotenv()
 
@@ -64,7 +64,7 @@ class TokenPool:
             raise ValueError("At least one GitHub token is required.")
         # Each entry: {"token": str, "client": Github, "reset_at": datetime|None}
         self._pool = [
-            {"token": t, "client": Github(t), "reset_at": None} for t in tokens
+            {"token": t, "client": Github(auth=Auth.Token(t)), "reset_at": None} for t in tokens
         ]
         self._current = 0
 
@@ -317,66 +317,77 @@ def scrape_via_search(pool: TokenPool, args):
         date_str = args.opened_before.strftime("%Y-%m-%d")
         query_parts.append(f"created:<={date_str}")
 
-    # Language filter
-    if args.languages:
-        lang_clause = " OR ".join(f"language:{lang}" for lang in sorted(args.languages))
-        query_parts.append(f"({lang_clause})")
+    # Language filter: issue a separate search per language (the GitHub search
+    # API does not support OR for the language: qualifier) and merge results
+    # by (repo, pr_number) to avoid duplicates.
+    languages_to_search = sorted(args.languages) if args.languages else [None]
 
-    query = " ".join(query_parts)
-    logger.info("Searching GitHub with query: %s", query)
+    seen: set[tuple[str, int]] = set()
 
-    def _search(client, q):
-        return client.search_issues(query=q, sort="created", order="desc")
+    for lang in languages_to_search:
+        parts = list(query_parts)
+        if lang is not None:
+            parts.append(f"language:{lang}")
+        query = " ".join(parts)
+        logger.info("Searching GitHub with query: %s", query)
 
-    try:
-        results = _call_with_retry(pool, _search, query)
-    except GithubException as exc:
-        logger.error("Search failed: %s", exc)
-        return
+        def _search(client, q):
+            return client.search_issues(query=q, sort="created", order="desc")
 
-    for issue in results:
-        if issue.pull_request is None:
+        try:
+            results = _call_with_retry(pool, _search, query)
+        except GithubException as exc:
+            logger.error("Search failed: %s", exc)
             continue
 
-        repo_full_name = issue.repository.full_name
-        owner, _, repo_name = repo_full_name.partition("/")
-        pr_number = issue.number
-
-        pr_dir = DATA_ROOT / owner / repo_name / str(pr_number)
-        json_path = pr_dir / f"{pr_number}.json"
-
-        if not json_path.exists():
-            try:
-                def _get_pr(client, rfn, pn):
-                    return client.get_repo(rfn).get_pull(pn)
-                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            except GithubException as exc:
-                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
+        for issue in results:
+            if issue.pull_request is None:
                 continue
 
-            if not _pr_matches(pr, args):
+            repo_full_name = issue.repository.full_name
+            owner, _, repo_name = repo_full_name.partition("/")
+            pr_number = issue.number
+
+            key = (repo_full_name, pr_number)
+            if key in seen:
                 continue
+            seen.add(key)
 
-            download_pr(pool, repo_full_name, pr, pr_dir)
-        else:
-            logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr_number)
-            try:
-                def _get_pr(client, rfn, pn):
-                    return client.get_repo(rfn).get_pull(pn)
-                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            except GithubException as exc:
-                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
-                continue
+            pr_dir = DATA_ROOT / owner / repo_name / str(pr_number)
+            json_path = pr_dir / f"{pr_number}.json"
 
-        if args.reviews:
-            reviews_dir = pr_dir / "reviews"
-            if not reviews_dir.exists():
-                download_reviews(pool, pr, reviews_dir)
+            if not json_path.exists():
+                try:
+                    def _get_pr(client, rfn, pn):
+                        return client.get_repo(rfn).get_pull(pn)
+                    pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
+                except GithubException as exc:
+                    logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
+                    continue
 
-        if args.comments:
-            comments_dir = pr_dir / "comments"
-            if not comments_dir.exists():
-                download_comments(pool, pr, comments_dir)
+                if not _pr_matches(pr, args):
+                    continue
+
+                download_pr(pool, repo_full_name, pr, pr_dir)
+            else:
+                logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr_number)
+                try:
+                    def _get_pr(client, rfn, pn):
+                        return client.get_repo(rfn).get_pull(pn)
+                    pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
+                except GithubException as exc:
+                    logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
+                    continue
+
+            if args.reviews:
+                reviews_dir = pr_dir / "reviews"
+                if not reviews_dir.exists():
+                    download_reviews(pool, pr, reviews_dir)
+
+            if args.comments:
+                comments_dir = pr_dir / "comments"
+                if not comments_dir.exists():
+                    download_comments(pool, pr, comments_dir)
 
 
 # ---------------------------------------------------------------------------
