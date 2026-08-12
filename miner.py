@@ -219,9 +219,9 @@ def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
         logger.info("Saved %s", review_path)
 
 
-def download_comments(pool: TokenPool, pr, pr_dir: Path):
+def download_review_comments(pool: TokenPool, pr, pr_dir: Path):
     """Download all review comments for a PR into a single comments.json file."""
-    comments_path = pr_dir / "comments.json"
+    comments_path = pr_dir / "review-comments.json"
     if comments_path.exists():
         return
     pr_dir.mkdir(parents=True, exist_ok=True)
@@ -229,6 +229,27 @@ def download_comments(pool: TokenPool, pr, pr_dir: Path):
         client = pool.get()
         try:
             comments = list(pr.get_review_comments())
+            break
+        except RateLimitExceededException:
+            pool.mark_rate_limited(client)
+
+    comments_path.write_text(
+        json.dumps([c.raw_data for c in comments], indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Saved %s (%d review comments)", comments_path, len(comments))
+
+
+def download_comments(pool: TokenPool, pr, pr_dir: Path):
+    """Download all comments for a PR into a single comments.json file."""
+    comments_path = pr_dir / "comments.json"
+    if comments_path.exists():
+        return
+    pr_dir.mkdir(parents=True, exist_ok=True)
+    while True:
+        client = pool.get()
+        try:
+            comments = list(pr.get_issue_comments())
             break
         except RateLimitExceededException:
             pool.mark_rate_limited(client)
@@ -298,6 +319,7 @@ def backfill_comments(pool: TokenPool, args):
                 return client.get_repo(rfn).get_pull(pn)
             pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
             download_comments(pool, pr, pr_dir)
+            download_review_comments(pool, pr, pr_dir)
         except GithubException as exc:
             logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
 
