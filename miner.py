@@ -271,6 +271,8 @@ def backfill_reviews(pool: TokenPool, args):
             continue
         pr_dir = json_path.parent
         reviews_dir = pr_dir / "reviews"
+        if reviews_dir.exists():
+            return
         try:
             pr_data = json.loads(json_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -289,6 +291,7 @@ def backfill_reviews(pool: TokenPool, args):
                 return client.get_repo(rfn).get_pull(pn)
             pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
             download_reviews(pool, pr, reviews_dir)
+            download_review_comments(pool, pr, reviews_dir)
         except GithubException as exc:
             logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
 
@@ -299,7 +302,6 @@ def backfill_comments(pool: TokenPool, args):
         if json_path.name == "comments.json" or json_path.parent.name == "reviews":
             continue
         pr_dir = json_path.parent
-        reviews_dir = pr_dir / "reviews"
         if (pr_dir / "comments.json").exists():
             continue
         try:
@@ -319,7 +321,6 @@ def backfill_comments(pool: TokenPool, args):
                 return client.get_repo(rfn).get_pull(pn)
             pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
             download_comments(pool, pr, pr_dir)
-            download_review_comments(pool, pr, reviews_dir)
         except GithubException as exc:
             logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
 
