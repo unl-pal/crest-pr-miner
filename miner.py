@@ -267,8 +267,7 @@ def download_comments(pool: TokenPool, pr, pr_dir: Path):
 def backfill_reviews(pool: TokenPool, args):
     """Walk existing PR JSON files and download missing reviews."""
     for json_path in sorted(DATA_ROOT.rglob("*.json")):
-        # Skip files already inside reviews/ or comments/
-        if json_path.parent.name in ("reviews", "comments"):
+        if json_path.name == "comments.json" or json_path.parent.name == "reviews":
             continue
         pr_dir = json_path.parent
         reviews_dir = pr_dir / "reviews"
