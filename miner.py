@@ -63,7 +63,7 @@ class TokenPool:
             raise ValueError("At least one GitHub token is required.")
         # Each entry: {"token": str, "client": Github, "reset_at": datetime|None}
         self._pool = [
-            {"token": t, "client": Github(auth=Auth.Token(t)), "reset_at": None} for t in tokens
+            {"token": t, "client": Github(auth=Auth.Token(t), user_agent="CREST-PR-Miner/1.0.0 (https://github.com/unl-pal/crest-pr-miner)"), "reset_at": None} for t in tokens
         ]
         self._current = 0
 
