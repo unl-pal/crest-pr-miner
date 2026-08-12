@@ -219,12 +219,12 @@ def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
         logger.info("Saved %s", review_path)
 
 
-def download_review_comments(pool: TokenPool, pr, pr_dir: Path):
+def download_review_comments(pool: TokenPool, pr, reviews_dir: Path):
     """Download all review comments for a PR into a single comments.json file."""
-    comments_path = pr_dir / "review-comments.json"
+    comments_path = pr_dir / "reviews" / "comments.json"
     if comments_path.exists():
         return
-    pr_dir.mkdir(parents=True, exist_ok=True)
+    reviews_dir.mkdir(parents=True, exist_ok=True)
     while True:
         client = pool.get()
         try:
@@ -300,6 +300,7 @@ def backfill_comments(pool: TokenPool, args):
         if json_path.name == "comments.json" or json_path.parent.name == "reviews":
             continue
         pr_dir = json_path.parent
+        reviews_dir = pr_dir / "reviews"
         if (pr_dir / "comments.json").exists():
             continue
         try:
@@ -319,7 +320,7 @@ def backfill_comments(pool: TokenPool, args):
                 return client.get_repo(rfn).get_pull(pn)
             pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
             download_comments(pool, pr, pr_dir)
-            download_review_comments(pool, pr, pr_dir)
+            download_review_comments(pool, pr, reviews_dir)
         except GithubException as exc:
             logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
 
