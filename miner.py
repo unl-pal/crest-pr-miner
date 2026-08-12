@@ -17,8 +17,7 @@ Data is stored under data/<owner>/<repo>/<pr_id>/:
     <pr_id>.diff          Unified diff of the PR
     reviews/
         <review_id>.json  Review objects (only with --reviews)
-    comments/
-        <comment_id>.json PR review comments (only with --comments)
+    comments.json         PR review comments as a JSON array (only with --comments)
 """
 
 import argparse
@@ -220,23 +219,25 @@ def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
         logger.info("Saved %s", review_path)
 
 
-def download_comments(pool: TokenPool, pr, comments_dir: Path):
-    """Download all review comments for a PR into comments_dir."""
-    comments_dir.mkdir(parents=True, exist_ok=True)
+def download_comments(pool: TokenPool, pr, pr_dir: Path):
+    """Download all review comments for a PR into a single comments.json file."""
+    comments_path = pr_dir / "comments.json"
+    if comments_path.exists():
+        return
+    pr_dir.mkdir(parents=True, exist_ok=True)
     while True:
         client = pool.get()
         try:
-            comments = list(pr.get_comments())
+            comments = list(pr.get_review_comments())
             break
         except RateLimitExceededException:
             pool.mark_rate_limited(client)
 
-    for comment in comments:
-        comment_path = comments_dir / f"{comment.id}.json"
-        if comment_path.exists():
-            continue
-        comment_path.write_text(json.dumps(comment.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        logger.info("Saved %s", comment_path)
+    comments_path.write_text(
+        json.dumps([c.raw_data for c in comments], indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Saved %s (%d comments)", comments_path, len(comments))
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +276,11 @@ def backfill_reviews(pool: TokenPool, args):
 def backfill_comments(pool: TokenPool, args):
     """Walk existing PR JSON files and download missing review comments."""
     for json_path in sorted(DATA_ROOT.rglob("*.json")):
-        if json_path.parent.name in ("reviews", "comments"):
+        if json_path.name == "comments.json" or json_path.parent.name == "reviews":
             continue
         pr_dir = json_path.parent
-        comments_dir = pr_dir / "comments"
+        if (pr_dir / "comments.json").exists():
+            continue
         try:
             pr_data = json.loads(json_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -295,7 +297,7 @@ def backfill_comments(pool: TokenPool, args):
             def _get_pr(client, rfn, pn):
                 return client.get_repo(rfn).get_pull(pn)
             pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            download_comments(pool, pr, comments_dir)
+            download_comments(pool, pr, pr_dir)
         except GithubException as exc:
             logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
 
@@ -385,9 +387,7 @@ def scrape_via_search(pool: TokenPool, args):
                     download_reviews(pool, pr, reviews_dir)
 
             if args.comments:
-                comments_dir = pr_dir / "comments"
-                if not comments_dir.exists():
-                    download_comments(pool, pr, comments_dir)
+                download_comments(pool, pr, pr_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +452,7 @@ def scrape_repos(pool: TokenPool, repos: list[str], args):
                     download_reviews(pool, pr, reviews_dir)
 
             if args.comments:
-                comments_dir = pr_dir / "comments"
-                if not comments_dir.exists():
-                    download_comments(pool, pr, comments_dir)
+                download_comments(pool, pr, pr_dir)
 
 
 # ---------------------------------------------------------------------------
