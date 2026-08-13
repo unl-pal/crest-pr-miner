@@ -221,7 +221,7 @@ def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
 
 def download_review_comments(pool: TokenPool, pr, reviews_dir: Path):
     """Download all review comments for a PR into a single comments.json file."""
-    comments_path = pr_dir / "reviews" / "comments.json"
+    comments_path = reviews_dir / "comments.json"
     if comments_path.exists():
         return
     reviews_dir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +272,7 @@ def backfill_reviews(pool: TokenPool, args):
         pr_dir = json_path.parent
         reviews_dir = pr_dir / "reviews"
         if reviews_dir.exists():
-            return
+            continue
         try:
             pr_data = json.loads(json_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
