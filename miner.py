@@ -16,6 +16,7 @@ Data is stored under data/<owner>/<repo>/<pr_id>/:
     <pr_id>.json          Pull request metadata
     <pr_id>.diff          Unified diff of the PR
     reviews/
+        comments.json     Review comments as a JSON array (only with --reviews)
         <review_id>.json  Review objects (only with --reviews)
     comments.json         PR review comments as a JSON array (only with --comments)
 """
