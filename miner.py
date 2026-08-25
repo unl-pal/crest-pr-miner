@@ -19,6 +19,10 @@ Data is stored under data/<owner>/<repo>/<pr_id>/:
         comments.json     Review comments as a JSON array (only with --reviews)
         <review_id>.json  Review objects (only with --reviews)
     comments.json         PR review comments as a JSON array (only with --comments)
+    timeline.json         PR issue timeline as a JSON array (only with --timeline)
+    commits/
+        <sha>.json        Commit metadata (only with --commits)
+        <sha>.diff        Commit diff (only with --commits)
 """
 
 import argparse
@@ -262,30 +266,111 @@ def download_comments(pool: TokenPool, pr, pr_dir: Path):
     logger.info("Saved %s (%d comments)", comments_path, len(comments))
 
 
+def download_timeline(pool: TokenPool, repo_full_name: str, pr_number: int, pr_dir: Path):
+    """Download the issue timeline for a PR into timeline.json."""
+    import urllib.request
+
+    timeline_path = pr_dir / "timeline.json"
+    if timeline_path.exists():
+        return
+    pr_dir.mkdir(parents=True, exist_ok=True)
+
+    url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/timeline"
+    events: list = []
+    page = 1
+    while True:
+        paged_url = f"{url}?per_page=100&page={page}"
+        while True:
+            client = pool.get()
+            token = pool.get_token(client)
+            req = urllib.request.Request(paged_url)
+            req.add_header("Authorization", f"token {token}")
+            req.add_header("Accept", "application/vnd.github+json")
+            req.add_header("X-GitHub-Api-Version", "2022-11-28")
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 403:
+                    pool.mark_rate_limited(client)
+                else:
+                    logger.warning(
+                        "Timeline request failed for %s#%s (page %d): %s",
+                        repo_full_name, pr_number, page, exc,
+                    )
+                    data = []
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "Timeline request failed for %s#%s (page %d): %s",
+                    repo_full_name, pr_number, page, exc,
+                )
+                data = []
+                break
+
+        if not data:
+            break
+        events.extend(data)
+        if len(data) < 100:
+            break
+        page += 1
+
+    timeline_path.write_text(json.dumps(events, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("Saved %s (%d events)", timeline_path, len(events))
+
+
+def download_commits(pool: TokenPool, pr, pr_dir: Path):
+    """Download commit metadata and diffs for a PR into a commits/ subdirectory."""
+    import urllib.request
+
+    commits_dir = pr_dir / "commits"
+    commits_dir.mkdir(parents=True, exist_ok=True)
+
+    while True:
+        client = pool.get()
+        try:
+            commits = list(pr.get_commits())
+            break
+        except RateLimitExceededException:
+            pool.mark_rate_limited(client)
+
+    for commit in commits:
+        sha = commit.sha
+        json_path = commits_dir / f"{sha}.json"
+        diff_path = commits_dir / f"{sha}.diff"
+
+        if not json_path.exists():
+            json_path.write_text(
+                json.dumps(commit.raw_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            logger.info("Saved %s", json_path)
+
+        if not diff_path.exists():
+            diff_url = f"https://github.com/{pr.base.repo.full_name}/commit/{sha}.diff"
+            try:
+                req = urllib.request.Request(diff_url)
+                client = pool.get()
+                token = pool.get_token(client)
+                if token:
+                    req.add_header("Authorization", f"token {token}")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    diff_path.write_bytes(resp.read())
+                logger.info("Saved %s", diff_path)
+            except Exception as exc:
+                logger.warning("Could not download diff for commit %s: %s", sha, exc)
+
+
 # ---------------------------------------------------------------------------
 # Backfill reviews / comments from existing JSON files
 # ---------------------------------------------------------------------------
 def backfill_reviews(pool: TokenPool, args):
     """Walk existing PR JSON files and download missing reviews."""
-    for json_path in sorted(DATA_ROOT.rglob("*.json")):
-        if json_path.name == "comments.json" or json_path.parent.name == "reviews":
-            continue
-        pr_dir = json_path.parent
+    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
         reviews_dir = pr_dir / "reviews"
         if reviews_dir.exists():
             continue
-        try:
-            pr_data = json.loads(json_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        pr_number = pr_data.get("number")
-        if pr_number is None:
-            continue
-        # Derive repo from path: data/<owner>/<repo>/<pr_id>/
-        parts = pr_dir.relative_to(DATA_ROOT).parts
-        if len(parts) < 3:
-            continue
-        repo_full_name = f"{parts[0]}/{parts[1]}"
         logger.info("Backfilling reviews for %s PR #%s", repo_full_name, pr_number)
         try:
             def _get_pr(client, rfn, pn):
@@ -299,12 +384,27 @@ def backfill_reviews(pool: TokenPool, args):
 
 def backfill_comments(pool: TokenPool, args):
     """Walk existing PR JSON files and download missing review comments."""
-    for json_path in sorted(DATA_ROOT.rglob("*.json")):
-        if json_path.name == "comments.json" or json_path.parent.name == "reviews":
-            continue
-        pr_dir = json_path.parent
+    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
         if (pr_dir / "comments.json").exists():
             continue
+        logger.info("Backfilling comments for %s PR #%s", repo_full_name, pr_number)
+        try:
+            def _get_pr(client, rfn, pn):
+                return client.get_repo(rfn).get_pull(pn)
+            pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
+            download_comments(pool, pr, pr_dir)
+        except GithubException as exc:
+            logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
+
+
+def _iter_pr_dirs():
+    """Yield (pr_dir, repo_full_name, pr_number) for all previously mined PRs."""
+    for json_path in sorted(DATA_ROOT.rglob("*.json")):
+        if json_path.name in ("comments.json", "timeline.json"):
+            continue
+        if json_path.parent.name in ("reviews", "commits"):
+            continue
+        pr_dir = json_path.parent
         try:
             pr_data = json.loads(json_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -316,12 +416,30 @@ def backfill_comments(pool: TokenPool, args):
         if len(parts) < 3:
             continue
         repo_full_name = f"{parts[0]}/{parts[1]}"
-        logger.info("Backfilling comments for %s PR #%s", repo_full_name, pr_number)
+        yield pr_dir, repo_full_name, pr_number
+
+
+def backfill_timeline(pool: TokenPool, args):
+    """Walk existing PR JSON files and download missing timeline data."""
+    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
+        if (pr_dir / "timeline.json").exists():
+            continue
+        logger.info("Backfilling timeline for %s PR #%s", repo_full_name, pr_number)
+        download_timeline(pool, repo_full_name, pr_number, pr_dir)
+
+
+def backfill_commits(pool: TokenPool, args):
+    """Walk existing PR JSON files and download missing commit data."""
+    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
+        commits_dir = pr_dir / "commits"
+        if commits_dir.exists():
+            continue
+        logger.info("Backfilling commits for %s PR #%s", repo_full_name, pr_number)
         try:
             def _get_pr(client, rfn, pn):
                 return client.get_repo(rfn).get_pull(pn)
             pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            download_comments(pool, pr, pr_dir)
+            download_commits(pool, pr, pr_dir)
         except GithubException as exc:
             logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
 
@@ -494,7 +612,7 @@ def parse_args(argv=None):
         nargs="*",
         metavar="owner/repo",
         help="Repositories to scrape (e.g. torvalds/linux). Not required when "
-             "--reviews or --comments is used alone to backfill existing data.",
+             "--reviews, --comments, --timeline, or --commits is used alone to backfill existing data.",
     )
 
     # Filtering
@@ -547,6 +665,16 @@ def parse_args(argv=None):
         "--comments",
         action="store_true",
         help="Download (or backfill) PR review comments.",
+    )
+    mode_group.add_argument(
+        "--timeline",
+        action="store_true",
+        help="Backfill PR issue timeline data (stored as timeline.json).",
+    )
+    mode_group.add_argument(
+        "--commits",
+        action="store_true",
+        help="Backfill PR commit metadata and diffs (stored in commits/).",
     )
 
     # Output
@@ -615,12 +743,16 @@ def main(argv=None):
     pool = TokenPool(tokens)
 
     if not args.repos:
-        if args.reviews or args.comments:
+        if args.reviews or args.comments or args.timeline or args.commits:
             # Backfill-only mode: walk existing data
             if args.reviews:
                 backfill_reviews(pool, args)
             if args.comments:
                 backfill_comments(pool, args)
+            if args.timeline:
+                backfill_timeline(pool, args)
+            if args.commits:
+                backfill_commits(pool, args)
         else:
             # No repos and no backfill flags: use GitHub search API
             scrape_via_search(pool, args)
