@@ -5,7 +5,7 @@ token rotation when rate limits are hit.
 
 Usage:
 ```
-    python miner.py [options] <repo1> [<repo2> ...]
+    python pr-miner.py [options] <repo1> [<repo2> ...]
 ```
 
 Environment:
@@ -31,7 +31,7 @@ Data is stored under `data/<owner>/<repo>/<pr_id>/`:
 ## Usage
 
 ```
-usage: miner.py [-h] [--languages LANG [LANG ...]] [--min-participants N] [--keywords KW [KW ...]] [--opened-before ISO_DATE] [--no-language-filter]
+usage: pr-miner.py [-h] [--languages LANG [LANG ...]] [--min-participants N] [--keywords KW [KW ...]] [--opened-before ISO_DATE] [--no-language-filter]
                 [--reviews] [--comments] [--timeline] [--commits] [--data-dir DIR] [--verbose]
                 [owner/repo ...]
 
