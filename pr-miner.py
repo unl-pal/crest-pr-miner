@@ -447,9 +447,97 @@ def backfill_commits(pool: TokenPool, args):
 # ---------------------------------------------------------------------------
 # Search-based scraping (no explicit repos given)
 # ---------------------------------------------------------------------------
+def _get_pr(client, rfn, pn):
+    return client.get_repo(rfn).get_pull(pn)
+
+
+def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[int, datetime | None]:
+    """Execute one search query, process all results, and return (total_count, oldest_created_at).
+
+    ``seen`` is mutated in place to record (repo_full_name, pr_number) pairs that have
+    already been processed, so that overlapping results from subsequent date-windowed
+    queries are skipped automatically.
+
+    Returns the ``total_count`` reported by the API and the creation date of the oldest
+    result seen in this page (or ``None`` if no results were returned).
+    """
+    def _search(client, q):
+        return client.search_issues(query=q, sort="created", order="desc")
+
+    try:
+        results = _call_with_retry(pool, _search, query)
+    except GithubException as exc:
+        logger.error("Search failed: %s", exc)
+        return 0, None
+
+    total_count = results.totalCount
+    oldest_created_at: datetime | None = None
+
+    for issue in results:
+        if issue.pull_request is None:
+            continue
+
+        repo_full_name = issue.repository.full_name
+        owner, _, repo_name = repo_full_name.partition("/")
+        pr_number = issue.number
+
+        # Track the oldest creation date we see so we can narrow the next window.
+        issue_created = issue.created_at
+        if issue_created is not None:
+            if issue_created.tzinfo is None:
+                issue_created = issue_created.replace(tzinfo=timezone.utc)
+            if oldest_created_at is None or issue_created < oldest_created_at:
+                oldest_created_at = issue_created
+
+        key = (repo_full_name, pr_number)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        pr_dir = DATA_ROOT / owner / repo_name / str(pr_number)
+        json_path = pr_dir / f"{pr_number}.json"
+
+        if not json_path.exists():
+            try:
+                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
+            except GithubException as exc:
+                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
+                continue
+
+            if not _pr_matches(pr, args):
+                continue
+
+            download_pr(pool, repo_full_name, pr, pr_dir)
+        else:
+            logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr_number)
+            try:
+                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
+            except GithubException as exc:
+                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
+                continue
+
+        if args.reviews:
+            reviews_dir = pr_dir / "reviews"
+            if not reviews_dir.exists():
+                download_reviews(pool, pr, reviews_dir)
+
+        if args.comments:
+            download_comments(pool, pr, pr_dir)
+
+    return total_count, oldest_created_at
+
+
 def scrape_via_search(pool: TokenPool, args):
-    """Use the GitHub search API to find PRs matching the configured filters."""
-    # Build search query
+    """Use the GitHub search API to find PRs matching the configured filters.
+
+    The GitHub search API caps results at 1 000 items per query.  To work
+    around this limit the function issues repeated searches with a progressively
+    earlier ``created:<=YYYY-MM-DD`` upper-bound, derived from the oldest
+    creation date seen in the previous batch, until the number of results
+    collected accounts for the ``total_count`` reported by the first query.
+    Overlapping results between batches are skipped via the ``seen`` set.
+    """
+    # Build base search query
     query_parts = ["is:pr"]
 
     # Keyword filter: search for any keyword in the title/body
@@ -469,67 +557,73 @@ def scrape_via_search(pool: TokenPool, args):
     seen: set[tuple[str, int]] = set()
 
     for lang in languages_to_search:
-        parts = list(query_parts)
+        base_parts = list(query_parts)
         if lang is not None:
-            parts.append(f"language:{lang}")
-        query = " ".join(parts)
-        logger.info("Searching GitHub with query: %s", query)
+            base_parts.append(f"language:{lang}")
 
-        def _search(client, q):
-            return client.search_issues(query=q, sort="created", order="desc")
+        # --- Paginated search loop ---
+        # Each iteration issues one search query.  After the first query we
+        # know the total_count; we continue issuing narrowed queries (using the
+        # oldest creation date from the previous batch as a new upper-bound)
+        # until we have processed at least that many unique results.
+        current_upper_bound: str | None = None  # added to base_parts each iteration
+        expected_total: int | None = None
+        # Track the count of unique results seen before this language loop starts
+        # so we can measure per-language progress independently.
+        seen_before_lang = len(seen)
 
-        try:
-            results = _call_with_retry(pool, _search, query)
-        except GithubException as exc:
-            logger.error("Search failed: %s", exc)
-            continue
+        while True:
+            parts = list(base_parts)
+            if current_upper_bound is not None:
+                # Replace any existing created:<= qualifier with the new one.
+                parts = [p for p in parts if not p.startswith("created:<=")]
+                parts.append(f"created:<={current_upper_bound}")
 
-        for issue in results:
-            if issue.pull_request is None:
-                continue
+            query = " ".join(parts)
+            processed = len(seen) - seen_before_lang
+            logger.info(
+                "Searching GitHub with query: %s (processed so far: %d / %s)",
+                query,
+                processed,
+                str(expected_total) if expected_total is not None else "?",
+            )
 
-            repo_full_name = issue.repository.full_name
-            owner, _, repo_name = repo_full_name.partition("/")
-            pr_number = issue.number
+            total_count, oldest_created_at = _scrape_search_page(pool, args, query, seen)
 
-            key = (repo_full_name, pr_number)
-            if key in seen:
-                continue
-            seen.add(key)
+            if expected_total is None:
+                expected_total = total_count
+                logger.info("Total results reported by API: %d", expected_total)
 
-            pr_dir = DATA_ROOT / owner / repo_name / str(pr_number)
-            json_path = pr_dir / f"{pr_number}.json"
+            processed = len(seen) - seen_before_lang
+            logger.info("Processed %d / %d unique results so far", processed, expected_total)
 
-            if not json_path.exists():
-                try:
-                    def _get_pr(client, rfn, pn):
-                        return client.get_repo(rfn).get_pull(pn)
-                    pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-                except GithubException as exc:
-                    logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
-                    continue
+            # Stop if the API returned nothing useful or we have no new date boundary.
+            if oldest_created_at is None:
+                logger.info("No results returned; stopping search for language=%s", lang)
+                break
 
-                if not _pr_matches(pr, args):
-                    continue
+            # Stop if we have accounted for (at least) the expected total.
+            if processed >= expected_total:
+                logger.info(
+                    "Collected %d results, meeting expected total of %d; done.",
+                    processed,
+                    expected_total,
+                )
+                break
 
-                download_pr(pool, repo_full_name, pr, pr_dir)
-            else:
-                logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr_number)
-                try:
-                    def _get_pr(client, rfn, pn):
-                        return client.get_repo(rfn).get_pull(pn)
-                    pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-                except GithubException as exc:
-                    logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
-                    continue
-
-            if args.reviews:
-                reviews_dir = pr_dir / "reviews"
-                if not reviews_dir.exists():
-                    download_reviews(pool, pr, reviews_dir)
-
-            if args.comments:
-                download_comments(pool, pr, pr_dir)
+            # Narrow the window: next query will use the oldest date seen so far.
+            next_upper_bound = oldest_created_at.strftime("%Y-%m-%d")
+            if next_upper_bound == current_upper_bound:
+                # The oldest date hasn't changed; all remaining results share this date
+                # and further queries would loop indefinitely.  Stop here.
+                logger.info(
+                    "Date window unchanged (%s); cannot make further progress. "
+                    "Stopping search for language=%s.",
+                    current_upper_bound,
+                    lang,
+                )
+                break
+            current_upper_bound = next_upper_bound
 
 
 # ---------------------------------------------------------------------------
