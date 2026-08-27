@@ -73,24 +73,28 @@ class TokenPool:
         self._current = 0
 
     def get(self) -> Github:
-        """Return the best available GitHub client, sleeping if necessary."""
-        # Pick the entry whose reset_at is earliest (None counts as now)
+        """Return the next available GitHub client in round-robin order, sleeping if necessary."""
         now = datetime.now(tz=timezone.utc)
+        n = len(self._pool)
 
-        def reset_key(entry):
+        # Try each token starting from _current, wrapping around.
+        for i in range(n):
+            entry = self._pool[(self._current + i) % n]
             ra = entry["reset_at"]
-            return ra if ra is not None else now
+            if ra is None or ra <= now:
+                self._current = (self._current + i + 1) % n
+                return entry["client"]
 
-        best = min(self._pool, key=reset_key)
-        ra = best["reset_at"]
-        if ra is not None and ra > now:
-            wait = (ra - now).total_seconds() + 5
-            logger.warning(
-                "All tokens rate-limited; sleeping %.0f seconds until %s",
-                wait,
-                ra.isoformat(),
-            )
-            time.sleep(wait)
+        # All tokens are rate-limited; sleep until the earliest reset.
+        best = min(self._pool, key=lambda e: e["reset_at"])
+        wait = (best["reset_at"] - now).total_seconds() + 5
+        logger.warning(
+            "All tokens rate-limited; sleeping %.0f seconds until %s",
+            wait,
+            best["reset_at"].isoformat(),
+        )
+        time.sleep(wait)
+        self._current = (self._pool.index(best) + 1) % n
         return best["client"]
 
     def get_token(self, client: Github) -> str | None:
@@ -99,6 +103,17 @@ class TokenPool:
             if entry["client"] is client:
                 return entry["token"]
         return None
+
+    def update_rate_limit(self, client: Github):
+        """Refresh the rate-limit reset time for a client after a successful API call."""
+        for entry in self._pool:
+            if entry["client"] is client:
+                try:
+                    reset_ts = client.get_rate_limit().core.reset
+                    entry["reset_at"] = reset_ts.replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
+                break
 
     def mark_rate_limited(self, client: Github):
         """Record the reset time for a client that just hit a rate limit."""
@@ -121,7 +136,9 @@ def _call_with_retry(pool: TokenPool, fn, *args, **kwargs):
     while True:
         client = pool.get()
         try:
-            return fn(client, *args, **kwargs)
+            result = fn(client, *args, **kwargs)
+            pool.update_rate_limit(client)
+            return result
         except RateLimitExceededException:
             pool.mark_rate_limited(client)
 
