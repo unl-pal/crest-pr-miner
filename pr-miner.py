@@ -462,7 +462,13 @@ def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[i
     result seen in this page (or ``None`` if no results were returned).
     """
     def _search(client, q):
-        return client.search_issues(query=q, sort="created", order="desc")
+        results = client.search_issues(query=q, sort="created", order="desc", per_page=100)
+        # Work around a PyGithub bug where totalCount is capped at 1000.
+        # Fetching the first page forces the underlying HTTP response to be
+        # parsed, after which totalCount reflects the real value from the JSON
+        # 'total_count' field.
+        results.get_page(0)
+        return results
 
     try:
         results = _call_with_retry(pool, _search, query)
@@ -527,27 +533,54 @@ def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[i
     return total_count, oldest_created_at
 
 
+def _get_time_window(pool: TokenPool, base_query: str) -> tuple[datetime | None, datetime | None]:
+    """Return (earliest_created_at, latest_created_at) for a search query.
+
+    Issues two lightweight single-item requests to discover the full time span
+    of matching results, which is used to initialise the windowed pagination
+    loop in :func:`scrape_via_search`.
+    """
+    def _search_one(client, q, order):
+        results = client.search_issues(query=q, sort="created", order=order, per_page=1)
+        page = results.get_page(0)
+        return page[0] if page else None
+
+    latest_issue = None
+    earliest_issue = None
+    try:
+        latest_issue = _call_with_retry(pool, _search_one, base_query, "desc")
+        earliest_issue = _call_with_retry(pool, _search_one, base_query, "asc")
+    except GithubException as exc:
+        logger.error("Could not determine time window: %s", exc)
+
+    def _ts(issue) -> datetime | None:
+        if issue is None:
+            return None
+        ts = issue.created_at
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
+
+    return _ts(earliest_issue), _ts(latest_issue)
+
+
 def scrape_via_search(pool: TokenPool, args):
     """Use the GitHub search API to find PRs matching the configured filters.
 
     The GitHub search API caps results at 1 000 items per query.  To work
-    around this limit the function issues repeated searches with a progressively
-    earlier ``created:<=YYYY-MM-DD`` upper-bound, derived from the oldest
-    creation date seen in the previous batch, until the number of results
-    collected accounts for the ``total_count`` reported by the first query.
+    around this limit the function determines the full creation-date window of
+    matching results with two lightweight probe requests, then issues repeated
+    searches using a ``created:EARLIEST..WINDOW_END`` range.  After each batch
+    the window end is moved back to the oldest timestamp seen in that batch,
+    progressively narrowing the window until all results have been collected.
     Overlapping results between batches are skipped via the ``seen`` set.
     """
-    # Build base search query
+    # Build base search query (no date filter yet — that is added per window)
     query_parts = ["is:pr"]
 
     # Keyword filter: search for any keyword in the title/body
     keyword_clause = " OR ".join(f'"{kw}"' for kw in args.keywords)
     query_parts.append(f"({keyword_clause})")
-
-    # Date filter
-    if args.opened_before:
-        date_str = args.opened_before.strftime("%Y-%m-%d")
-        query_parts.append(f"created:<={date_str}")
 
     # Language filter: issue a separate search per language (the GitHub search
     # API does not support OR for the language: qualifier) and merge results
@@ -561,25 +594,44 @@ def scrape_via_search(pool: TokenPool, args):
         if lang is not None:
             base_parts.append(f"language:{lang}")
 
+        # Apply the opened_before ceiling to the probe query so we discover the
+        # window only within the requested date range.
+        probe_parts = list(base_parts)
+        if args.opened_before:
+            probe_parts.append(f"created:<={args.opened_before.strftime('%Y-%m-%d')}")
+        probe_query = " ".join(probe_parts)
+
+        logger.info("Determining time window for query: %s", probe_query)
+        earliest_ts, latest_ts = _get_time_window(pool, probe_query)
+
+        if earliest_ts is None or latest_ts is None:
+            logger.warning("Could not determine time window for language=%s; skipping.", lang)
+            continue
+
+        logger.info(
+            "Time window for language=%s: %s .. %s",
+            lang,
+            earliest_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            latest_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+
+        # Format helpers
+        def _fmt(dt: datetime) -> str:
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         # --- Paginated search loop ---
-        # Each iteration issues one search query.  After the first query we
-        # know the total_count; we continue issuing narrowed queries (using the
-        # oldest creation date from the previous batch as a new upper-bound)
-        # until we have processed at least that many unique results.
-        current_upper_bound: str | None = None  # added to base_parts each iteration
+        # Each iteration issues one search query covering earliest_ts..window_end.
+        # After each batch the window_end is set to the oldest timestamp seen,
+        # progressively narrowing the window toward the past.
+        window_end: datetime = latest_ts
         expected_total: int | None = None
-        # Track the count of unique results seen before this language loop starts
-        # so we can measure per-language progress independently.
         seen_before_lang = len(seen)
 
         while True:
-            parts = list(base_parts)
-            if current_upper_bound is not None:
-                # Replace any existing created:<= qualifier with the new one.
-                parts = [p for p in parts if not p.startswith("created:<=")]
-                parts.append(f"created:<={current_upper_bound}")
-
+            range_filter = f"created:{_fmt(earliest_ts)}..{_fmt(window_end)}"
+            parts = [p for p in base_parts if not p.startswith("created:")] + [range_filter]
             query = " ".join(parts)
+
             processed = len(seen) - seen_before_lang
             logger.info(
                 "Searching GitHub with query: %s (processed so far: %d / %s)",
@@ -597,7 +649,7 @@ def scrape_via_search(pool: TokenPool, args):
             processed = len(seen) - seen_before_lang
             logger.info("Processed %d / %d unique results so far", processed, expected_total)
 
-            # Stop if the API returned nothing useful or we have no new date boundary.
+            # Stop if the API returned nothing useful.
             if oldest_created_at is None:
                 logger.info("No results returned; stopping search for language=%s", lang)
                 break
@@ -611,19 +663,17 @@ def scrape_via_search(pool: TokenPool, args):
                 )
                 break
 
-            # Narrow the window: next query will use the oldest date seen so far.
-            next_upper_bound = oldest_created_at.strftime("%Y-%m-%d")
-            if next_upper_bound == current_upper_bound:
-                # The oldest date hasn't changed; all remaining results share this date
-                # and further queries would loop indefinitely.  Stop here.
+            # Narrow the window: move window_end back to the oldest timestamp seen.
+            if oldest_created_at >= window_end:
+                # No progress; avoid an infinite loop.
                 logger.info(
-                    "Date window unchanged (%s); cannot make further progress. "
+                    "Window end unchanged (%s); cannot make further progress. "
                     "Stopping search for language=%s.",
-                    current_upper_bound,
+                    _fmt(window_end),
                     lang,
                 )
                 break
-            current_upper_bound = next_upper_bound
+            window_end = oldest_created_at
 
 
 # ---------------------------------------------------------------------------
