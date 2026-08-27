@@ -208,13 +208,7 @@ def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
 def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
     """Download all reviews for a PR into reviews_dir."""
     reviews_dir.mkdir(parents=True, exist_ok=True)
-    while True:
-        client = pool.get()
-        try:
-            reviews = list(pr.get_reviews())
-            break
-        except RateLimitExceededException:
-            pool.mark_rate_limited(client)
+    reviews = _call_with_retry(pool, lambda client: list(pr.get_reviews()))
 
     for review in reviews:
         review_path = reviews_dir / f"{review.id}.json"
@@ -230,13 +224,7 @@ def download_review_comments(pool: TokenPool, pr, reviews_dir: Path):
     if comments_path.exists():
         return
     reviews_dir.mkdir(parents=True, exist_ok=True)
-    while True:
-        client = pool.get()
-        try:
-            comments = list(pr.get_review_comments())
-            break
-        except RateLimitExceededException:
-            pool.mark_rate_limited(client)
+    comments = _call_with_retry(pool, lambda client: list(pr.get_review_comments()))
 
     comments_path.write_text(
         json.dumps([c.raw_data for c in comments], indent=2, ensure_ascii=False),
@@ -251,13 +239,7 @@ def download_comments(pool: TokenPool, pr, pr_dir: Path):
     if comments_path.exists():
         return
     pr_dir.mkdir(parents=True, exist_ok=True)
-    while True:
-        client = pool.get()
-        try:
-            comments = list(pr.get_issue_comments())
-            break
-        except RateLimitExceededException:
-            pool.mark_rate_limited(client)
+    comments = _call_with_retry(pool, lambda client: list(pr.get_issue_comments()))
 
     comments_path.write_text(
         json.dumps([c.raw_data for c in comments], indent=2, ensure_ascii=False),
@@ -326,14 +308,7 @@ def download_commits(pool: TokenPool, pr, pr_dir: Path):
 
     commits_dir = pr_dir / "commits"
     commits_dir.mkdir(parents=True, exist_ok=True)
-
-    while True:
-        client = pool.get()
-        try:
-            commits = list(pr.get_commits())
-            break
-        except RateLimitExceededException:
-            pool.mark_rate_limited(client)
+    commits = _call_with_retry(pool, lambda client: list(pr.get_commits()))
 
     for commit in commits:
         sha = commit.sha
