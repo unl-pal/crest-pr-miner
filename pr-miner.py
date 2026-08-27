@@ -61,37 +61,54 @@ DATA_ROOT = Path("data")
 # Token / rate-limit management
 # ---------------------------------------------------------------------------
 class TokenPool:
-    """Round-robin token pool that respects per-token rate-limit resets."""
+    """Round-robin token pool that respects per-token rate-limit resets.
+
+    GitHub exposes separate rate-limit buckets for different API categories
+    (e.g. ``core`` for most REST calls and ``search`` for the search API).
+    Each token entry tracks a reset time per category so that the pool
+    can rotate and sleep correctly regardless of which bucket a call uses.
+    """
 
     def __init__(self, tokens: list[str]):
         if not tokens:
             raise ValueError("At least one GitHub token is required.")
-        # Each entry: {"token": str, "client": Github, "reset_at": datetime|None}
+        # Each entry: {"token": str, "client": Github, "reset_at": {category: datetime|None}}
         self._pool = [
-            {"token": t, "client": Github(auth=Auth.Token(t), user_agent="CREST-PR-Miner/1.0.0 (https://github.com/unl-pal/crest-pr-miner)"), "reset_at": None} for t in tokens
+            {
+                "token": t,
+                "client": Github(auth=Auth.Token(t), user_agent="CREST-PR-Miner/1.0.0 (https://github.com/unl-pal/crest-pr-miner)"),
+                "reset_at": {},
+            }
+            for t in tokens
         ]
         self._current = 0
 
-    def get(self) -> Github:
-        """Return the next available GitHub client in round-robin order, sleeping if necessary."""
+    def get(self, category: str = "core") -> Github:
+        """Return the next available GitHub client in round-robin order.
+
+        Only tokens whose ``category`` rate-limit reset time has passed are
+        considered available.  If all tokens are exhausted the method sleeps
+        until the earliest reset and then returns that token's client.
+        """
         now = datetime.now(tz=timezone.utc)
         n = len(self._pool)
 
         # Try each token starting from _current, wrapping around.
         for i in range(n):
             entry = self._pool[(self._current + i) % n]
-            ra = entry["reset_at"]
+            ra = entry["reset_at"].get(category)
             if ra is None or ra <= now:
                 self._current = (self._current + i + 1) % n
                 return entry["client"]
 
-        # All tokens are rate-limited; sleep until the earliest reset.
-        best = min(self._pool, key=lambda e: e["reset_at"])
-        wait = (best["reset_at"] - now).total_seconds() + 5
+        # All tokens are rate-limited for this category; sleep until earliest reset.
+        best = min(self._pool, key=lambda e: e["reset_at"].get(category, now))
+        wait = (best["reset_at"][category] - now).total_seconds() + 5
         logger.warning(
-            "All tokens rate-limited; sleeping %.0f seconds until %s",
+            "All tokens rate-limited for '%s'; sleeping %.0f seconds until %s",
+            category,
             wait,
-            best["reset_at"].isoformat(),
+            best["reset_at"][category].isoformat(),
         )
         time.sleep(wait)
         self._current = (self._pool.index(best) + 1) % n
@@ -104,43 +121,58 @@ class TokenPool:
                 return entry["token"]
         return None
 
-    def update_rate_limit(self, client: Github):
+    def _fetch_reset(self, client: Github, category: str) -> datetime | None:
+        """Fetch the rate-limit reset time for *category* from the API."""
+        try:
+            rl = client.get_rate_limit()
+            resource = getattr(rl, category, None)
+            if resource is not None:
+                reset_ts = resource.reset
+                return reset_ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+        return None
+
+    def update_rate_limit(self, client: Github, category: str = "core"):
         """Refresh the rate-limit reset time for a client after a successful API call."""
         for entry in self._pool:
             if entry["client"] is client:
-                try:
-                    reset_ts = client.get_rate_limit().core.reset
-                    entry["reset_at"] = reset_ts.replace(tzinfo=timezone.utc)
-                except Exception:
-                    pass
+                ts = self._fetch_reset(client, category)
+                if ts is not None:
+                    entry["reset_at"][category] = ts
                 break
 
-    def mark_rate_limited(self, client: Github):
+    def mark_rate_limited(self, client: Github, category: str = "core"):
         """Record the reset time for a client that just hit a rate limit."""
         for entry in self._pool:
             if entry["client"] is client:
-                try:
-                    reset_ts = client.get_rate_limit().core.reset
-                    entry["reset_at"] = reset_ts.replace(tzinfo=timezone.utc)
-                except Exception:
-                    entry["reset_at"] = datetime.now(tz=timezone.utc) + timedelta(hours=1)
-                logger.info("Token rate-limited; reset at %s", entry["reset_at"])
+                ts = self._fetch_reset(client, category)
+                if ts is None:
+                    ts = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+                entry["reset_at"][category] = ts
+                logger.info("Token rate-limited (%s); reset at %s", category, ts)
                 break
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _call_with_retry(pool: TokenPool, fn, *args, **kwargs):
-    """Call fn(client, *args, **kwargs), rotating tokens on rate limits."""
+def _call_with_retry(pool: TokenPool, fn, *args, category: str = "core", **kwargs):
+    """Call fn(client, *args, **kwargs), rotating tokens on rate limits.
+
+    ``category`` identifies the GitHub API rate-limit bucket the call uses
+    (e.g. ``"core"`` or ``"search"``).  It is forwarded to :meth:`TokenPool.get`,
+    :meth:`TokenPool.update_rate_limit`, and :meth:`TokenPool.mark_rate_limited`
+    so that each bucket is tracked independently.
+    """
     while True:
-        client = pool.get()
+        client = pool.get(category)
         try:
             result = fn(client, *args, **kwargs)
-            pool.update_rate_limit(client)
+            pool.update_rate_limit(client, category)
             return result
         except RateLimitExceededException:
-            pool.mark_rate_limited(client)
+            pool.mark_rate_limited(client, category)
 
 
 def _participants(pr) -> list:
@@ -463,7 +495,7 @@ def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[i
         return results
 
     try:
-        results = _call_with_retry(pool, _search, query)
+        results = _call_with_retry(pool, _search, query, category="search")
     except GithubException as exc:
         logger.error("Search failed: %s", exc)
         return 0, None
@@ -540,8 +572,8 @@ def _get_time_window(pool: TokenPool, base_query: str) -> tuple[datetime | None,
     latest_issue = None
     earliest_issue = None
     try:
-        latest_issue = _call_with_retry(pool, _search_one, base_query, "desc")
-        earliest_issue = _call_with_retry(pool, _search_one, base_query, "asc")
+        latest_issue = _call_with_retry(pool, _search_one, base_query, "desc", category="search")
+        earliest_issue = _call_with_retry(pool, _search_one, base_query, "asc", category="search")
     except GithubException as exc:
         logger.error("Could not determine time window: %s", exc)
 
