@@ -79,7 +79,7 @@ class TokenPool:
         self._pool = [
             {
                 "token": t,
-                "client": Github(auth=Auth.Token(t), user_agent="CREST-PR-Miner/1.0.0 (https://github.com/unl-pal/crest-pr-miner)"),
+                "client": Github(auth=Auth.Token(t), per_page=100, user_agent="CREST-PR-Miner/1.0.0 (https://github.com/unl-pal/crest-pr-miner)"),
                 "reset_at": {},
             }
             for t in tokens
@@ -313,7 +313,7 @@ def download_timeline(pool: TokenPool, repo_full_name: str, pr_number: int, pr_d
     events: list = []
     page = 1
     while True:
-        paged_url = f"{url}?per_page=100&page={page}"
+        paged_url = f"{url}?page={page}"
         while True:
             client = pool.get()
             token = pool.get_token(client)
@@ -487,7 +487,7 @@ def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[i
     result seen in this page (or ``None`` if no results were returned).
     """
     def _search(client, q):
-        results = client.search_issues(query=q, sort="created", order="desc", per_page=100)
+        results = client.search_issues(query=q, sort="created", order="desc")
         # Work around a PyGithub bug where totalCount is capped at 1000.
         # Fetching the first page forces the underlying HTTP response to be
         # parsed, after which totalCount reflects the real value from the JSON
@@ -566,8 +566,10 @@ def _get_time_window(pool: TokenPool, base_query: str) -> tuple[datetime | None,
     loop in :func:`scrape_via_search`.
     """
     def _search_one(client, q, order):
-        results = client.search_issues(query=q, sort="created", order=order, per_page=1)
+        client.requester.per_page = 1
+        results = client.search_issues(query=q, sort="created", order=order)
         page = results.get_page(0)
+        client.requester.per_page = 100
         return page[0] if page else None
 
     latest_issue = None
