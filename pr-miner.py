@@ -58,6 +58,7 @@ DEFAULT_MIN_PARTICIPANTS = 2
 DEFAULT_KEYWORDS = ["CWE-", "CVE-"]
 DEFAULT_OPENED_BEFORE = datetime(2026, 8, 12, tzinfo=timezone.utc)
 DATA_ROOT = Path("data")
+SKIPPED_DATA_ROOT = Path("skipped")
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +232,12 @@ def _pr_matches(pr, args) -> bool:
 # ---------------------------------------------------------------------------
 # Download functions
 # ---------------------------------------------------------------------------
+def skip_pr(pr, pr_dir: Path):
+    pr_dir.mkdir(parents=True, exist_ok=True)
+    json_path = pr_dir / f"{pr.number}.json"
+    json_path.write_text(json.dumps(pr.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
     """Download PR JSON and diff into pr_dir."""
     pr_dir.mkdir(parents=True, exist_ok=True)
@@ -526,9 +533,12 @@ def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[i
         seen.add(key)
 
         pr_dir = DATA_ROOT / owner / repo_name / str(pr_number)
+        skip_pr_dir = SKIPPED_DATA_ROOT / owner / repo_name / str(pr_number)
         json_path = pr_dir / f"{pr_number}.json"
+        skip_json_path = skip_pr_dir / f"{pr_number}.json"
 
-        if not json_path.exists():
+        if not json_path.exists() and not skip_json_path.exists():
+            logger.debug("Saving PR %s#%s to %s", repo_full_name, pr_number, json_path)
             try:
                 pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
             except GithubException as exc:
@@ -536,11 +546,13 @@ def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[i
                 continue
 
             if not _pr_matches(pr, args):
+                logger.debug("PR %s#%s failed to pass filters, skipping", repo_full_name, pr_number)
+                skip_pr(pr, skip_pr_dir)
                 continue
 
             download_pr(pool, repo_full_name, pr, pr_dir)
         else:
-            logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr_number)
+            logger.debug("PR %s#%s already downloaded or skipped, skipping", repo_full_name, pr_number)
             try:
                 pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
             except GithubException as exc:
@@ -749,11 +761,15 @@ def scrape_repos(pool: TokenPool, repos: list[str], args):
                 continue
 
             pr_dir = DATA_ROOT / owner / repo_name / str(pr.number)
+            skip_pr_dir = SKIPPED_DATA_ROOT / owner / repo_name / str(pr.number)
 
             # Skip if already fully scraped (JSON exists)
             json_path = pr_dir / f"{pr.number}.json"
-            if not json_path.exists():
+            skip_json_path = skip_pr_dir / f"{pr.number}.json"
+            if not json_path.exists() and not skip_json_path.exists():
                 if not _pr_matches(pr, args):
+                    logger.debug("PR %s#%s failed to pass filters, skipping", repo_full_name, pr_number)
+                    skip_pr(pr, skip_pr_dir)
                     continue
                 download_pr(pool, repo_full_name, pr, pr_dir)
             else:
