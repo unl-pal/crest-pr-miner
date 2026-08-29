@@ -210,13 +210,13 @@ def _participants(pr) -> list:
 def _pr_matches(pr, args) -> bool:
     """Return True if pr passes all configured filters."""
     # Date filter
-    if args.opened_before and pr.created_at.replace(tzinfo=timezone.utc) > args.opened_before:
-        return False
+    #if args.opened_before and pr.created_at.replace(tzinfo=timezone.utc) > args.opened_before:
+    #    return False
 
     # Keyword filter
-    text = " ".join(filter(None, [pr.title, pr.body or ""]))
-    if not any(kw.lower() in text.lower() for kw in args.keywords):
-        return False
+    #text = " ".join(filter(None, [pr.title, pr.body or ""]))
+    #if not any(kw.lower() in text.lower() for kw in args.keywords):
+    #    return False
 
     # Participant filters
     participants = _participants(pr)
