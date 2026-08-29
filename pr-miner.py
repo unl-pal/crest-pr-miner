@@ -102,6 +102,7 @@ class TokenPool:
             entry = self._pool[(self._current + i) % n]
             ra = entry["reset_at"].get(category)
             if ra is None or ra <= now:
+                logger.info("[pool] using token %s with reset %s", entry["token"], ra)
                 self._current = (self._current + i + 1) % n
                 return entry["client"]
 
@@ -129,6 +130,7 @@ class TokenPool:
         """Fetch the rate-limit reset time for *category* from the API."""
         try:
             rl = client.get_rate_limit()
+            print(json.dumps(rl))
             resource = getattr(rl, category, None)
             if resource is not None:
                 reset_ts = resource.reset
@@ -142,6 +144,7 @@ class TokenPool:
         for entry in self._pool:
             if entry["client"] is client:
                 ts = self._fetch_reset(client, category)
+                logger.debug("[pool] token %s category %s resets %s", entry["token"], category, ts)
                 if ts is not None:
                     entry["reset_at"][category] = ts
                 break
