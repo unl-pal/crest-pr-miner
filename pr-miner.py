@@ -32,11 +32,13 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import urllib.request
 
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from github import Auth, Github, RateLimitExceededException, GithubException
+from pathlib import Path
+
 
 load_dotenv()
 
@@ -179,10 +181,12 @@ def _participants(pr) -> list:
     """Return unique non-None participants for a PR."""
     seen: set[str] = set()
     people = []
+
     for user in [pr.user, pr.merged_by]:
         if user and user.login not in seen:
             seen.add(user.login)
             people.append(user)
+
     try:
         for review in pr.get_reviews():
             if review.user and review.user.login not in seen:
@@ -190,6 +194,7 @@ def _participants(pr) -> list:
                 people.append(review.user)
     except GithubException:
         pass
+
     try:
         for comment in pr.get_issue_comments():
             if comment.user and comment.user.login not in seen:
@@ -197,6 +202,7 @@ def _participants(pr) -> list:
                 people.append(comment.user)
     except GithubException:
         pass
+
     return people
 
 
@@ -237,8 +243,6 @@ def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
         logger.info("Saved %s", json_path)
 
     if not diff_path.exists():
-        import urllib.request
-
         diff_url = pr.diff_url
         try:
             req = urllib.request.Request(diff_url)
@@ -299,8 +303,6 @@ def download_comments(pool: TokenPool, pr, pr_dir: Path):
 
 def download_timeline(pool: TokenPool, repo_full_name: str, pr_number: int, pr_dir: Path):
     """Download the issue timeline for a PR into timeline.json."""
-    import urllib.request
-
     timeline_path = pr_dir / "timeline.json"
     if timeline_path.exists():
         return
@@ -353,8 +355,6 @@ def download_timeline(pool: TokenPool, repo_full_name: str, pr_number: int, pr_d
 
 def download_commits(pool: TokenPool, pr, pr_dir: Path):
     """Download commit metadata and diffs for a PR into a commits/ subdirectory."""
-    import urllib.request
-
     commits_dir = pr_dir / "commits"
     commits_dir.mkdir(parents=True, exist_ok=True)
     commits = _call_with_retry(pool, lambda client: list(pr.get_commits()))
