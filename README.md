@@ -61,3 +61,42 @@ modes:
   --timeline            Backfill PR issue timeline data (stored as timeline.json).
   --commits             Backfill PR commit metadata and diffs (stored in commits/).
 ```
+
+# CWE Catalog Miner
+
+Downloads the full Common Weakness Enumeration (CWE) catalog from MITRE's
+public REST API (`cwe-api.mitre.org`) — no XML parsing, no credentials
+required.
+
+Usage:
+```
+    python cwe-miner.py [options]
+```
+
+Data is stored under `cwes/<type>/cwe-<id>.json` (or `--data-dir`):
+```
+    weakness/cwe-<id>.json   One file per CWE weakness entry
+    category/cwe-<id>.json   One file per CWE category entry
+    view/cwe-<id>.json       One file per CWE view entry
+```
+
+## Usage
+
+```
+usage: cwe-miner.py [-h] [--start START] [--end END]
+                    [--types {category,view,weakness} [{category,view,weakness} ...]]
+                    [--data-dir DATA_DIR] [--force] [--verbose]
+
+options:
+  -h, --help            show this help message and exit
+  --start START         Only write entries with CWE ID >= START.
+  --end END             Only write entries with CWE ID <= END.
+  --types {category,view,weakness} [{category,view,weakness} ...]
+                        Which CWE entry types to download (default: all).
+  --data-dir DATA_DIR   Root directory for downloaded data (default: cwes).
+  --force               Re-fetch from the API and overwrite existing files.
+  --verbose, -v         Enable debug logging.
+```
+
+Reruns are safe: existing `cwe-<id>.json` files are skipped unless
+`--force` is passed.
