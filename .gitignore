@@ -153,6 +153,10 @@ activemq-data/
 data/*
 !data/.gitkeep
 
+# Downloaded CWE catalog data
+cwes/*
+!cwes/.gitkeep
+
 # Environments
 .env
 .envrc
