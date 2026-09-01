@@ -100,3 +100,39 @@ options:
 
 Reruns are safe: existing `cwe-<id>.json` files are skipped unless
 `--force` is passed.
+
+# Find CVEs in PRs
+
+Scans every mined PR under `data/` for CVE ID mentions and builds a single
+aggregate index. Every file in a PR's directory is scanned as plain text
+(not schema-aware JSON parsing) except `*.diff` files, which are excluded
+since they include unchanged surrounding context lines that can produce
+false matches unrelated to that PR.
+
+Usage:
+```
+    python find-cves-in-prs.py [options]
+```
+
+Output is a single JSON file (`data/cve_index.json` by default) mapping
+each distinct CVE ID to every PR directory it was found in:
+```
+    {
+      "CVE-2021-44228": ["data/apache/log4j-core/456", "data/torvalds/linux/123"],
+      "CVE-2019-1010218": ["data/some/repo/789"]
+    }
+```
+
+## Usage
+
+```
+usage: find-cves-in-prs.py [-h] [--data-dir DATA_DIR] [--output OUTPUT]
+                           [--verbose]
+
+options:
+  -h, --help           show this help message and exit
+  --data-dir DATA_DIR  Root directory of mined PR data (default: data).
+  --output OUTPUT      Output path for the index (default: <data-
+                       dir>/cve_index.json).
+  --verbose, -v        Enable debug logging.
+```
