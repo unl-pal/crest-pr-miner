@@ -103,36 +103,35 @@ Reruns are safe: existing `cwe-<id>.json` files are skipped unless
 
 # Find CVEs in PRs
 
-Scans every mined PR under `data/` for CVE ID mentions and builds a single
-aggregate index. Every file in a PR's directory is scanned as plain text
+Scans every mined PR under `data/` for CVE ID mentions, then invokes
+`cve-downloader.py` for each distinct CVE found so its metadata gets
+downloaded. Every file in a PR's directory is scanned as plain text
 (not schema-aware JSON parsing) except `*.diff` files, which are excluded
 since they include unchanged surrounding context lines that can produce
 false matches unrelated to that PR.
+
+Requires `cve-downloader.py` to be present alongside this script.
 
 Usage:
 ```
     python find-cves-in-prs.py [options]
 ```
 
-Output is a single JSON file (`data/cve_index.json` by default) mapping
-each distinct CVE ID to every PR directory it was found in:
-```
-    {
-      "CVE-2021-44228": ["data/apache/log4j-core/456", "data/torvalds/linux/123"],
-      "CVE-2019-1010218": ["data/some/repo/789"]
-    }
-```
-
 ## Usage
 
 ```
-usage: find-cves-in-prs.py [-h] [--data-dir DATA_DIR] [--output OUTPUT]
-                           [--verbose]
+usage: find-cves-in-prs.py [-h] [--data-dir DATA_DIR]
+                           [--cve-data-dir CVE_DATA_DIR] [--force]
+                           [--skip-history] [--verbose]
 
 options:
-  -h, --help           show this help message and exit
-  --data-dir DATA_DIR  Root directory of mined PR data (default: data).
-  --output OUTPUT      Output path for the index (default: <data-
-                       dir>/cve_index.json).
-  --verbose, -v        Enable debug logging.
+  -h, --help            show this help message and exit
+  --data-dir DATA_DIR   Root directory of mined PR data (default: data).
+  --cve-data-dir CVE_DATA_DIR
+                        Root directory passed to cve-downloader.py for
+                        downloaded CVE data (default: cves).
+  --force               Pass --force through to cve-downloader.py to
+                        re-fetch and overwrite existing files.
+  --skip-history        Pass --skip-history through to cve-downloader.py.
+  --verbose, -v         Enable debug logging.
 ```
