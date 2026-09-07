@@ -44,7 +44,7 @@ def find_cve_ids(data_dir: Path) -> set[str]:
     files_scanned = 0
     files_skipped = 0
 
-    for file_path in sorted(data_dir.rglob("*")):
+    for file_path in data_dir.rglob("*"):
         if not file_path.is_file():
             continue
         if file_path.suffix == ".diff":
