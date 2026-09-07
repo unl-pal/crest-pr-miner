@@ -157,6 +157,10 @@ data/*
 cwes/*
 !cwes/.gitkeep
 
+# Downloaded CVE data
+cves/*
+!cves/.gitkeep
+
 # Environments
 .env
 .envrc

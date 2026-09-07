@@ -100,3 +100,47 @@ options:
 
 Reruns are safe: existing `cwe-<id>.json` files are skipped unless
 `--force` is passed.
+
+# CVE Downloader
+
+Downloads a single CVE's metadata and change history from NVD's public
+REST API (`services.nvd.nist.gov`), given its ID.
+
+Usage:
+```
+    python cve-downloader.py CVE-2021-44228 [options]
+```
+
+Environment:
+```
+    NVD_API_KEY  Optional. Raises the rate limit from 5 req/30s to 50
+                 req/30s. Set this in a .env file (see .env.example).
+```
+
+Data is stored under `cves/<id>/` (or `--data-dir`), as the full,
+unmodified NVD API response for each endpoint:
+```
+    <id>.json      Raw response from the CVE metadata endpoint
+    history.json   Raw response from the CVE history endpoint
+                   (cveChanges merged across pages if there was more than one)
+```
+
+## Usage
+
+```
+usage: cve-downloader.py [-h] [--data-dir DATA_DIR] [--force] [--skip-history]
+                         [--verbose]
+                         cve_id
+
+positional arguments:
+  cve_id               CVE ID to download, e.g. CVE-2021-44228
+
+options:
+  -h, --help           show this help message and exit
+  --data-dir DATA_DIR  Root directory for downloaded data (default: cves).
+  --force              Re-fetch from the API and overwrite existing files.
+  --skip-history       Only fetch metadata, skip the (slow) history scan.
+  --verbose, -v        Enable debug logging.
+```
+
+Reruns are safe: existing files are skipped unless `--force` is passed.
