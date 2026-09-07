@@ -213,10 +213,6 @@ def _participants(pr) -> list:
 
 def _pr_matches(pr, args) -> bool:
     """Return True if pr passes all configured filters."""
-    # Date filter
-    #if args.opened_before and pr.created_at.replace(tzinfo=timezone.utc) > args.opened_before:
-    #    return False
-
     # Keyword filter
     #text = " ".join(filter(None, [pr.title, pr.body or ""]))
     #if not any(kw.lower() in text.lower() for kw in args.keywords):
@@ -230,6 +226,22 @@ def _pr_matches(pr, args) -> bool:
         return False
 
     return True
+
+
+def _find_oldest_pr(args) -> str:
+    langs = [x.lower() for x in args.languages]
+    oldest = DEFAULT_OPENED_BEFORE.isoformat()
+    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
+        with open(pr_dir / (str(pr_number) + ".json"), "r") as f:
+            data = json.load(f)
+        try:
+            lang = data['base']['repo']['language'].lower()
+            if lang in langs:
+                if data['created_at'] < oldest:
+                    oldest = data['created_at']
+        except:
+            pass
+    return oldest
 
 
 # ---------------------------------------------------------------------------
@@ -838,6 +850,11 @@ def parse_args(argv=None):
         help="Only include PRs opened before this date (default: %(default)s).",
     )
     filter_group.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume mining using the oldest date of existing PRs.",
+    )
+    filter_group.add_argument(
         "--no-language-filter",
         action="store_true",
         dest="no_language_filter",
@@ -886,6 +903,11 @@ def parse_args(argv=None):
     # Post-process
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # resume based on date of oldest PR
+    if args.resume:
+        args.opened_before_str = _find_oldest_pr(args)
+        logger.info("Resumed search starting at %s", args.opened_before_str)
 
     # Parse opened_before
     try:
