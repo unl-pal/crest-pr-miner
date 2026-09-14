@@ -1,44 +1,41 @@
 #!/usr/bin/env python3
 """
-GitHub Pull Request Miner
+GitHub Pull Request Miner for CVEfixes
 
-Downloads GitHub PR data (JSON, diffs, reviews, comments) with automatic
-token rotation when rate limits are hit.
+Reads vulnerability fixing commits from CVEfixes (SQLite database or SQL dump)
+and resolves associated GitHub Pull Request links from the commit hashes.
 
-Usage:
-    python miner.py [options] <repo1> [<repo2> ...]
-
-Environment:
-    GH_TOKEN_LIST  Comma-delimited list of GitHub personal access tokens.
-                   Set this in a .env file (see .env.example).
-
-Data is stored under data/<owner>/<repo>/<pr_id>/:
-    <pr_id>.json          Pull request metadata
-    <pr_id>.diff          Unified diff of the PR
-    reviews/
-        comments.json     Review comments as a JSON array (only with --reviews)
-        <review_id>.json  Review objects (only with --reviews)
-    comments.json         PR review comments as a JSON array (only with --comments)
-    timeline.json         PR issue timeline as a JSON array (only with --timeline)
-    commits/
-        <sha>.json        Commit metadata (only with --commits)
-        <sha>.diff        Commit diff (only with --commits)
+Features:
+  - Supports CVEfixes SQLite database (.db / .sqlite) and SQL dumps (.sql)
+  - Automatic round-robin GitHub token rotation and rate-limit handling
+  - Multiple PR detection strategies:
+      1. GitHub Commits API (/repos/{owner}/{repo}/commits/{sha}/pulls)
+      2. Commit message parsing (e.g. "Merge pull request #123", "(#123)")
+      3. GitHub Search API fallback
+  - Processes first 100 commits by default (customizable via --limit)
+  - Outputs structured JSON results and a clean summary report
 """
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import sys
 import time
-import urllib.request
+from typing import Optional, List, Dict, Any
 
-from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from github import Auth, Github, RateLimitExceededException, GithubException
-from pathlib import Path
 
+from cvefixes import (
+    CVEfixesDatabase,
+    SampleCVEfixesProvider,
+    FixingCommit,
+    parse_github_repo,
+)
 
 load_dotenv()
 
@@ -50,926 +47,828 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-DEFAULT_LANGUAGES = {"Java", "C", "C++", "Python"}
-DEFAULT_MIN_PARTICIPANTS = 2
-DEFAULT_KEYWORDS = ["CWE-", "CVE-"]
-DEFAULT_OPENED_BEFORE = datetime(2026, 8, 12, tzinfo=timezone.utc)
-DATA_ROOT = Path("data")
-SKIPPED_DATA_ROOT = Path("skipped")
-
 
 # ---------------------------------------------------------------------------
-# Token / rate-limit management
+# Token Pool & Rate Limiting
 # ---------------------------------------------------------------------------
 class TokenPool:
-    """Round-robin token pool that respects per-token rate-limit resets.
+    """Round-robin token pool supporting multiple GitHub tokens and rate-limit categories."""
 
-    GitHub exposes separate rate-limit buckets for different API categories
-    (e.g. ``core`` for most REST calls and ``search`` for the search API).
-    Each token entry tracks a reset time per category so that the pool
-    can rotate and sleep correctly regardless of which bucket a call uses.
-    """
+    def __init__(self, tokens: Optional[List[str]] = None):
+        tokens = tokens or []
+        self._unauthenticated = len(tokens) == 0
 
-    def __init__(self, tokens: list[str]):
-        if not tokens:
-            raise ValueError("At least one GitHub token is required.")
-        # Each entry: {"token": str, "client": Github, "reset_at": {category: datetime|None}}
-        self._pool = [
-            {
-                "token": t,
-                "client": Github(auth=Auth.Token(t), per_page=100, user_agent="CREST-PR-Miner/1.0.0 (https://github.com/unl-pal/crest-pr-miner)"),
-                "reset_at": {},
-            }
-            for t in tokens
-        ]
+        if self._unauthenticated:
+            logger.warning(
+                "No GitHub token provided. Running unauthenticated with strict rate limits (60 req/hr). "
+                "Set GH_TOKEN_LIST or GITHUB_TOKEN in .env or pass --token to increase limits."
+            )
+            self._pool = [
+                {
+                    "token": "unauthenticated",
+                    "client": Github(
+                        per_page=100,
+                        user_agent="CREST-PR-Miner/2.0.0 (https://github.com/unl-pal/crest-pr-miner)",
+                    ),
+                    "reset_at": {},
+                }
+            ]
+        else:
+            self._pool = [
+                {
+                    "token": t,
+                    "client": Github(
+                        auth=Auth.Token(t),
+                        per_page=100,
+                        user_agent="CREST-PR-Miner/2.0.0 (https://github.com/unl-pal/crest-pr-miner)",
+                    ),
+                    "reset_at": {},
+                }
+                for t in tokens
+            ]
         self._current = 0
 
     def get(self, category: str = "core") -> Github:
-        """Return the next available GitHub client in round-robin order.
-
-        Only tokens whose ``category`` rate-limit reset time has passed are
-        considered available.  If all tokens are exhausted the method sleeps
-        until the earliest reset and then returns that token's client.
-        """
+        """Return the next available GitHub client, sleeping if all are exhausted."""
         now = datetime.now(tz=timezone.utc)
         n = len(self._pool)
 
-        # Try each token starting from _current, wrapping around.
         for i in range(n):
             entry = self._pool[(self._current + i) % n]
             ra = entry["reset_at"].get(category)
             if ra is None or ra <= now:
-                logger.info("[pool] using token %s with reset %s", entry["token"], ra)
                 self._current = (self._current + i + 1) % n
                 return entry["client"]
 
-        # All tokens are rate-limited for this category; sleep until earliest reset.
+        # All tokens rate-limited; wait for earliest reset
         best = min(self._pool, key=lambda e: e["reset_at"].get(category, now))
-        wait = (best["reset_at"][category] - now).total_seconds() + 5
+        reset_time = best["reset_at"].get(category, now)
+        wait_seconds = max(5.0, (reset_time - now).total_seconds() + 2)
         logger.warning(
             "All tokens rate-limited for '%s'; sleeping %.0f seconds until %s",
             category,
-            wait,
-            best["reset_at"][category].isoformat(),
+            wait_seconds,
+            reset_time.isoformat(),
         )
-        time.sleep(wait)
+        time.sleep(wait_seconds)
         self._current = (self._pool.index(best) + 1) % n
         return best["client"]
 
-    def get_token(self, client: Github) -> str | None:
-        """Return the raw token string associated with a client."""
-        for entry in self._pool:
-            if entry["client"] is client:
-                return entry["token"]
-        return None
-
-    def _fetch_reset(self, client: Github, category: str) -> datetime | None:
-        """Fetch the rate-limit reset time for *category* from the API."""
-        try:
-            rl = client.get_rate_limit()
-            print(json.dumps(rl))
-            resource = getattr(rl, category, None)
-            if resource is not None:
-                reset_ts = resource.reset
-                return reset_ts.replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
-        return None
-
-    def update_rate_limit(self, client: Github, category: str = "core"):
-        """Refresh the rate-limit reset time for a client after a successful API call."""
-        for entry in self._pool:
-            if entry["client"] is client:
-                ts = self._fetch_reset(client, category)
-                logger.debug("[pool] token %s category %s resets %s", entry["token"], category, ts)
-                if ts is not None:
-                    entry["reset_at"][category] = ts
-                break
-
     def mark_rate_limited(self, client: Github, category: str = "core"):
-        """Record the reset time for a client that just hit a rate limit."""
+        """Mark a client as rate-limited until reset."""
+        now = datetime.now(tz=timezone.utc)
         for entry in self._pool:
             if entry["client"] is client:
-                ts = self._fetch_reset(client, category)
-                if ts is None:
-                    ts = datetime.now(tz=timezone.utc) + timedelta(hours=1)
-                entry["reset_at"][category] = ts
-                logger.info("Token rate-limited (%s); reset at %s", category, ts)
-                break
+                try:
+                    rl = client.get_rate_limit()
+                    resource = getattr(rl, category, None)
+                    reset_ts = resource.reset.replace(tzinfo=timezone.utc) if resource else None
+                except Exception:
+                    reset_ts = None
 
+                if reset_ts is None or reset_ts <= now:
+                    reset_ts = now + timedelta(minutes=15)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _call_with_retry(pool: TokenPool, fn, *args, category: str = "core", **kwargs):
-    """Call fn(client, *args, **kwargs), rotating tokens on rate limits.
-
-    ``category`` identifies the GitHub API rate-limit bucket the call uses
-    (e.g. ``"core"`` or ``"search"``).  It is forwarded to :meth:`TokenPool.get`,
-    :meth:`TokenPool.update_rate_limit`, and :meth:`TokenPool.mark_rate_limited`
-    so that each bucket is tracked independently.
-    """
-    while True:
-        client = pool.get(category)
-        try:
-            result = fn(client, *args, **kwargs)
-            pool.update_rate_limit(client, category)
-            return result
-        except RateLimitExceededException:
-            pool.mark_rate_limited(client, category)
-
-
-def _participants(pr) -> list:
-    """Return unique non-None participants for a PR."""
-    seen: set[str] = set()
-    people = []
-
-    for user in [pr.user, pr.merged_by]:
-        if user and user.login not in seen:
-            seen.add(user.login)
-            people.append(user)
-
-    try:
-        for review in pr.get_reviews():
-            if review.user and review.user.login not in seen:
-                seen.add(review.user.login)
-                people.append(review.user)
-    except GithubException:
-        pass
-
-    try:
-        for comment in pr.get_issue_comments():
-            if comment.user and comment.user.login not in seen:
-                seen.add(comment.user.login)
-                people.append(comment.user)
-    except GithubException:
-        pass
-
-    return people
-
-
-def _pr_matches(pr, args) -> bool:
-    """Return True if pr passes all configured filters."""
-    # Keyword filter
-    #text = " ".join(filter(None, [pr.title, pr.body or ""]))
-    #if not any(kw.lower() in text.lower() for kw in args.keywords):
-    #    return False
-
-    # Participant filters
-    participants = _participants(pr)
-    if len(participants) < args.min_participants:
-        return False
-    if not any(not (p.login.endswith("[bot]") or getattr(p, "type", "") == "Bot") for p in participants):
-        return False
-
-    return True
-
-
-def _find_oldest_pr(args) -> str:
-    langs = [x.lower() for x in args.languages]
-    oldest = DEFAULT_OPENED_BEFORE.isoformat()
-    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
-        with open(pr_dir / (str(pr_number) + ".json"), "r") as f:
-            data = json.load(f)
-        try:
-            lang = data['base']['repo']['language'].lower()
-            if lang in langs:
-                if data['created_at'] < oldest:
-                    oldest = data['created_at']
-        except:
-            pass
-    return oldest
-
-
-# ---------------------------------------------------------------------------
-# Download functions
-# ---------------------------------------------------------------------------
-def skip_pr(pr, pr_dir: Path):
-    pr_dir.mkdir(parents=True, exist_ok=True)
-    json_path = pr_dir / f"{pr.number}.json"
-    json_path.write_text(json.dumps(pr.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
-    """Download PR JSON and diff into pr_dir."""
-    pr_dir.mkdir(parents=True, exist_ok=True)
-    pr_id = pr.number
-
-    json_path = pr_dir / f"{pr_id}.json"
-    diff_path = pr_dir / f"{pr_id}.diff"
-
-    if not json_path.exists():
-        json_path.write_text(json.dumps(pr.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        logger.info("Saved %s", json_path)
-
-    if not diff_path.exists():
-        diff_url = pr.diff_url
-        try:
-            req = urllib.request.Request(diff_url)
-            # Add auth if token available (avoids anonymous rate limits)
-            client = pool.get()
-            token = pool.get_token(client)
-            if token:
-                req.add_header("Authorization", f"token {token}")
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                diff_path.write_bytes(resp.read())
-            logger.info("Saved %s", diff_path)
-        except Exception as exc:
-            logger.warning("Could not download diff for PR %s: %s", pr_id, exc)
-
-
-def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
-    """Download all reviews for a PR into reviews_dir."""
-    reviews_dir.mkdir(parents=True, exist_ok=True)
-    reviews = _call_with_retry(pool, lambda client: list(pr.get_reviews()))
-
-    for review in reviews:
-        review_path = reviews_dir / f"{review.id}.json"
-        if review_path.exists():
-            continue
-        review_path.write_text(json.dumps(review.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        logger.info("Saved %s", review_path)
-
-
-def download_review_comments(pool: TokenPool, pr, reviews_dir: Path):
-    """Download all review comments for a PR into a single comments.json file."""
-    comments_path = reviews_dir / "comments.json"
-    if comments_path.exists():
-        return
-    reviews_dir.mkdir(parents=True, exist_ok=True)
-    comments = _call_with_retry(pool, lambda client: list(pr.get_review_comments()))
-
-    comments_path.write_text(
-        json.dumps([c.raw_data for c in comments], indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    logger.info("Saved %s (%d review comments)", comments_path, len(comments))
-
-
-def download_comments(pool: TokenPool, pr, pr_dir: Path):
-    """Download all comments for a PR into a single comments.json file."""
-    comments_path = pr_dir / "comments.json"
-    if comments_path.exists():
-        return
-    pr_dir.mkdir(parents=True, exist_ok=True)
-    comments = _call_with_retry(pool, lambda client: list(pr.get_issue_comments()))
-
-    comments_path.write_text(
-        json.dumps([c.raw_data for c in comments], indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    logger.info("Saved %s (%d comments)", comments_path, len(comments))
-
-
-def download_timeline(pool: TokenPool, repo_full_name: str, pr_number: int, pr_dir: Path):
-    """Download the issue timeline for a PR into timeline.json."""
-    timeline_path = pr_dir / "timeline.json"
-    if timeline_path.exists():
-        return
-    pr_dir.mkdir(parents=True, exist_ok=True)
-
-    url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/timeline"
-    events: list = []
-    page = 1
-    while True:
-        paged_url = f"{url}?page={page}"
-        while True:
-            client = pool.get()
-            token = pool.get_token(client)
-            req = urllib.request.Request(paged_url)
-            req.add_header("Authorization", f"token {token}")
-            req.add_header("Accept", "application/vnd.github+json")
-            req.add_header("X-GitHub-Api-Version", "2022-11-28")
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                break
-            except urllib.error.HTTPError as exc:
-                if exc.code == 403:
-                    pool.mark_rate_limited(client)
-                else:
-                    logger.warning(
-                        "Timeline request failed for %s#%s (page %d): %s",
-                        repo_full_name, pr_number, page, exc,
-                    )
-                    data = []
-                    break
-            except Exception as exc:
+                entry["reset_at"][category] = reset_ts
                 logger.warning(
-                    "Timeline request failed for %s#%s (page %d): %s",
-                    repo_full_name, pr_number, page, exc,
+                    "Token %s... rate-limited for '%s'; resets at %s",
+                    entry["token"][:8] if entry["token"] != "unauthenticated" else "unauth",
+                    category,
+                    reset_ts.isoformat(),
                 )
-                data = []
                 break
 
-        if not data:
-            break
-        events.extend(data)
-        if len(data) < 100:
-            break
-        page += 1
 
-    timeline_path.write_text(json.dumps(events, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info("Saved %s (%d events)", timeline_path, len(events))
+def load_github_tokens(cli_token: Optional[str] = None) -> List[str]:
+    """Collect tokens from CLI arguments, GH_TOKEN_LIST, or GITHUB_TOKEN."""
+    tokens: List[str] = []
+    if cli_token:
+        tokens.extend([t.strip() for t in cli_token.split(",") if t.strip()])
+
+    env_list = os.environ.get("GH_TOKEN_LIST", "")
+    if env_list:
+        tokens.extend([t.strip() for t in env_list.split(",") if t.strip()])
+
+    single_token = os.environ.get("GITHUB_TOKEN", "")
+    if single_token and single_token not in tokens:
+        tokens.append(single_token.strip())
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique
 
 
-def download_commits(pool: TokenPool, pr, pr_dir: Path):
-    """Download commit metadata and diffs for a PR into a commits/ subdirectory."""
-    commits_dir = pr_dir / "commits"
-    commits_dir.mkdir(parents=True, exist_ok=True)
-    commits = _call_with_retry(pool, lambda client: list(pr.get_commits()))
+# ---------------------------------------------------------------------------
+# PR Extraction Strategies & Confidence Scoring
+# ---------------------------------------------------------------------------
+PR_NUMBER_PATTERNS = [
+    re.compile(r"\(#(\d+)\)"),                         # Standard GitHub squash: "Title (#123)"
+    re.compile(r"[Mm]erge pull request #(\d+)"),        # Standard merge: "Merge pull request #123"
+    re.compile(r"[Pp]ull request #(\d+)"),             # "Pull request #123"
+    re.compile(r"[Gg]itHub PR:?\s*#(\d+)"),             # "GitHub PR #123"
+    re.compile(r"https?://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)"), # Full PR link in commit message
+]
 
-    for commit in commits:
-        sha = commit.sha
-        json_path = commits_dir / f"{sha}.json"
-        diff_path = commits_dir / f"{sha}.diff"
+SECURITY_KEYWORDS = [
+    "vulnerabilit", "security", "exploit", "cve", "cwe", "ghsa",
+    "sanitize", "sanitiz", "overflow", "traversal", "unauthorized",
+    "infinite loop", "bypass", "injection", "privilege escalation",
+    "rce", "csrf", "xss", "ssrf", "denial of service", "dos",
+    "out-of-bounds", "memory corruption", "hijack", "race condition",
+    "arbitrary", "null pointer", "advisory", "file://", "permission",
+]
 
-        if not json_path.exists():
-            json_path.write_text(
-                json.dumps(commit.raw_data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            logger.info("Saved %s", json_path)
+REFACTOR_KEYWORDS = [
+    "modernize", "refactor", "cleanup", "clean up", "pep ",
+    "style", "bump version", "release prep", "update docs", "format",
+]
 
-        if not diff_path.exists():
-            diff_url = f"https://github.com/{pr.base.repo.full_name}/commit/{sha}.diff"
+
+def extract_pr_numbers_from_message(message: Optional[str]) -> List[int]:
+    """Scan commit message for pull request numbers or links."""
+    if not message:
+        return []
+    numbers = []
+    for pattern in PR_NUMBER_PATTERNS:
+        for match in pattern.finditer(message):
             try:
-                req = urllib.request.Request(diff_url)
-                client = pool.get()
-                token = pool.get_token(client)
-                if token:
-                    req.add_header("Authorization", f"token {token}")
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    diff_path.write_bytes(resp.read())
-                logger.info("Saved %s", diff_path)
-            except Exception as exc:
-                logger.warning("Could not download diff for commit %s: %s", sha, exc)
+                numbers.append(int(match.group(1)))
+            except (ValueError, IndexError):
+                pass
+    return list(dict.fromkeys(numbers))
 
 
-# ---------------------------------------------------------------------------
-# Backfill reviews / comments from existing JSON files
-# ---------------------------------------------------------------------------
-def backfill_reviews(pool: TokenPool, args):
-    """Walk existing PR JSON files and download missing reviews."""
-    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
-        reviews_dir = pr_dir / "reviews"
-        if reviews_dir.exists():
-            continue
-        logger.info("Backfilling reviews for %s PR #%s", repo_full_name, pr_number)
-        try:
-            def _get_pr(client, rfn, pn):
-                return client.get_repo(rfn).get_pull(pn)
-            pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            download_reviews(pool, pr, reviews_dir)
-            download_review_comments(pool, pr, reviews_dir)
-        except GithubException as exc:
-            logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
-
-
-def backfill_comments(pool: TokenPool, args):
-    """Walk existing PR JSON files and download missing review comments."""
-    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
-        if (pr_dir / "comments.json").exists():
-            continue
-        logger.info("Backfilling comments for %s PR #%s", repo_full_name, pr_number)
-        try:
-            def _get_pr(client, rfn, pn):
-                return client.get_repo(rfn).get_pull(pn)
-            pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            download_comments(pool, pr, pr_dir)
-        except GithubException as exc:
-            logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
-
-
-def _iter_pr_dirs():
-    """Yield (pr_dir, repo_full_name, pr_number) for all previously mined PRs."""
-    for json_path in sorted(DATA_ROOT.rglob("*.json")):
-        if json_path.name in ("comments.json", "timeline.json"):
-            continue
-        if json_path.parent.name in ("reviews", "commits"):
-            continue
-        pr_dir = json_path.parent
-        try:
-            pr_data = json.loads(json_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        pr_number = pr_data.get("number")
-        if pr_number is None:
-            continue
-        parts = pr_dir.relative_to(DATA_ROOT).parts
-        if len(parts) < 3:
-            continue
-        repo_full_name = f"{parts[0]}/{parts[1]}"
-        yield pr_dir, repo_full_name, pr_number
-
-
-def backfill_timeline(pool: TokenPool, args):
-    """Walk existing PR JSON files and download missing timeline data."""
-    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
-        if (pr_dir / "timeline.json").exists():
-            continue
-        logger.info("Backfilling timeline for %s PR #%s", repo_full_name, pr_number)
-        download_timeline(pool, repo_full_name, pr_number, pr_dir)
-
-
-def backfill_commits(pool: TokenPool, args):
-    """Walk existing PR JSON files and download missing commit data."""
-    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
-        commits_dir = pr_dir / "commits"
-        if commits_dir.exists():
-            continue
-        logger.info("Backfilling commits for %s PR #%s", repo_full_name, pr_number)
-        try:
-            def _get_pr(client, rfn, pn):
-                return client.get_repo(rfn).get_pull(pn)
-            pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            download_commits(pool, pr, pr_dir)
-        except GithubException as exc:
-            logger.warning("Could not fetch PR %s#%s: %s", repo_full_name, pr_number, exc)
-
-
-# ---------------------------------------------------------------------------
-# Search-based scraping (no explicit repos given)
-# ---------------------------------------------------------------------------
-def _get_pr(client, rfn, pn):
-    return client.get_repo(rfn).get_pull(pn)
-
-
-def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[int, datetime | None]:
-    """Execute one search query, process all results, and return (total_count, oldest_created_at).
-
-    ``seen`` is mutated in place to record (repo_full_name, pr_number) pairs that have
-    already been processed, so that overlapping results from subsequent date-windowed
-    queries are skipped automatically.
-
-    Returns the ``total_count`` reported by the API and the creation date of the oldest
-    result seen in this page (or ``None`` if no results were returned).
-    """
-    def _search(client, q):
-        results = client.search_issues(query=q, sort="created", order="desc")
-        # Work around a PyGithub bug where totalCount is capped at 1000.
-        # Fetching the first page forces the underlying HTTP response to be
-        # parsed, after which totalCount reflects the real value from the JSON
-        # 'total_count' field.
-        results.get_page(0)
-        return results
-
+def extract_commit_code_changes(gh_commit) -> List[Dict[str, Any]]:
+    """Extract modified files with diff patch, vulnerable code, and fixed code."""
+    changes = []
     try:
-        results = _call_with_retry(pool, _search, query, category="search")
-    except GithubException as exc:
-        logger.error("Search failed: %s", exc)
-        return 0, None
-
-    total_count = results.totalCount
-    oldest_created_at: datetime | None = None
-
-    for issue in results:
-        if issue.pull_request is None:
-            continue
-
-        repo_full_name = issue.repository.full_name
-        owner, _, repo_name = repo_full_name.partition("/")
-        pr_number = issue.number
-
-        # Track the oldest creation date we see so we can narrow the next window.
-        issue_created = issue.created_at
-        if issue_created is not None:
-            if issue_created.tzinfo is None:
-                issue_created = issue_created.replace(tzinfo=timezone.utc)
-            if oldest_created_at is None or issue_created < oldest_created_at:
-                oldest_created_at = issue_created
-
-        key = (repo_full_name, pr_number)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        pr_dir = DATA_ROOT / owner / repo_name / str(pr_number)
-        skip_pr_dir = SKIPPED_DATA_ROOT / owner / repo_name / str(pr_number)
-        json_path = pr_dir / f"{pr_number}.json"
-        skip_json_path = skip_pr_dir / f"{pr_number}.json"
-
-        if not json_path.exists() and not skip_json_path.exists():
-            logger.debug("Saving PR %s#%s to %s", repo_full_name, pr_number, json_path)
-            try:
-                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            except GithubException as exc:
-                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
-                continue
-
-            if not _pr_matches(pr, args):
-                logger.debug("PR %s#%s failed to pass filters, skipping", repo_full_name, pr_number)
-                skip_pr(pr, skip_pr_dir)
-                continue
-
-            download_pr(pool, repo_full_name, pr, pr_dir)
-        else:
-            logger.debug("PR %s#%s already downloaded or skipped, skipping", repo_full_name, pr_number)
-            try:
-                pr = _call_with_retry(pool, _get_pr, repo_full_name, pr_number)
-            except GithubException as exc:
-                logger.warning("Could not fetch %s#%s: %s", repo_full_name, pr_number, exc)
-                continue
-
-        if args.reviews:
-            reviews_dir = pr_dir / "reviews"
-            if not reviews_dir.exists():
-                download_reviews(pool, pr, reviews_dir)
-
-        if args.comments:
-            download_comments(pool, pr, pr_dir)
-
-    return total_count, oldest_created_at
+        for f in gh_commit.files:
+            patch = f.patch or ""
+            vuln_lines = [line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")]
+            fixed_lines = [line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")]
+            changes.append({
+                "filename": f.filename,
+                "status": f.status,
+                "additions": f.additions,
+                "deletions": f.deletions,
+                "patch": patch,
+                "vulnerable_code": "\n".join(vuln_lines),
+                "fixed_code": "\n".join(fixed_lines),
+            })
+    except Exception as e:
+        logger.debug("Could not extract file changes from commit: %s", e)
+    return changes
 
 
-def _get_time_window(pool: TokenPool, base_query: str) -> tuple[datetime | None, datetime | None]:
-    """Return (earliest_created_at, latest_created_at) for a search query.
-
-    Issues two lightweight single-item requests to discover the full time span
-    of matching results, which is used to initialise the windowed pagination
-    loop in :func:`scrape_via_search`.
+def calculate_pr_confidence(
+    cve_id: Optional[str],
+    pr_data: Dict[str, Any],
+    commit_msg: Optional[str] = None,
+    detection_method: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    def _search_one(client, q, order):
-        client.requester.per_page = 1
-        results = client.search_issues(query=q, sort="created", order=order)
-        page = results.get_page(0)
-        client.requester.per_page = 100
-        return page[0] if page else None
-
-    latest_issue = None
-    earliest_issue = None
-    try:
-        latest_issue = _call_with_retry(pool, _search_one, base_query, "desc", category="search")
-        earliest_issue = _call_with_retry(pool, _search_one, base_query, "asc", category="search")
-    except GithubException as exc:
-        logger.error("Could not determine time window: %s", exc)
-
-    def _ts(issue) -> datetime | None:
-        if issue is None:
-            return None
-        ts = issue.created_at
-        if ts is not None and ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return ts
-
-    return _ts(earliest_issue), _ts(latest_issue)
-
-
-def scrape_via_search(pool: TokenPool, args):
-    """Use the GitHub search API to find PRs matching the configured filters.
-
-    The GitHub search API caps results at 1 000 items per query.  To work
-    around this limit the function determines the full creation-date window of
-    matching results with two lightweight probe requests, then issues repeated
-    searches using a ``created:EARLIEST..WINDOW_END`` range.  After each batch
-    the window end is moved back to the oldest timestamp seen in that batch,
-    progressively narrowing the window until all results have been collected.
-    Overlapping results between batches are skipped via the ``seen`` set.
+    Evaluates confidence that a PR is the actual security remediation for a CVE.
+    Returns:
+      - confidence_score: int (0 to 100)
+      - confidence_tier: 'HIGH', 'MEDIUM', 'LOW', 'SUSPICIOUS'
+      - confidence_factors: list of explanations
     """
-    # Build base search query (no date filter yet — that is added per window)
-    query_parts = ["is:pr"]
+    score = 50  # baseline
+    factors = []
 
-    # Keyword filter: search for any keyword in the title/body
-    keyword_clause = " OR ".join(f'"{kw}"' for kw in args.keywords)
-    query_parts.append(f"({keyword_clause})")
+    # 1. Temporal Analysis (CVE Year vs PR Merged/Created Year)
+    cve_year = None
+    if cve_id and cve_id.startswith("CVE-"):
+        parts = cve_id.split("-")
+        if len(parts) >= 2 and parts[1].isdigit():
+            cve_year = int(parts[1])
 
-    # Language filter: issue a separate search per language (the GitHub search
-    # API does not support OR for the language: qualifier) and merge results
-    # by (repo, pr_number) to avoid duplicates.
-    languages_to_search = sorted(args.languages) if args.languages else [None]
+    pr_year = None
+    merged_at = pr_data.get("merged_at") or pr_data.get("created_at")
+    if merged_at and len(merged_at) >= 4 and merged_at[:4].isdigit():
+        pr_year = int(merged_at[:4])
 
-    seen: set[tuple[str, int]] = set()
+    if cve_year and pr_year:
+        diff = cve_year - pr_year
+        if diff == 0:
+            score += 25
+            factors.append(f"PR merged in same year as CVE ({pr_year}) (+25)")
+        elif diff == 1:
+            score += 20
+            factors.append(f"PR merged 1 year prior to CVE ({pr_year} vs {cve_year}) (+20)")
+        elif diff == -1:
+            score += 15
+            factors.append("PR merged 1 year after CVE publication (+15)")
+        elif diff >= 3:
+            score -= 50
+            factors.append(f"PR merged {diff} years before CVE ({pr_year} vs {cve_year}) - likely bug-introducing or legacy commit (-50)")
+        elif diff == 2:
+            score -= 15
+            factors.append(f"PR merged 2 years before CVE ({pr_year} vs {cve_year}) (-15)")
 
-    for lang in languages_to_search:
-        base_parts = list(query_parts)
-        if lang is not None:
-            base_parts.append(f"language:{lang}")
+    # 2. Text Analysis (PR Title, Commit Message)
+    title = (pr_data.get("title") or "").lower()
+    msg = (commit_msg or "").lower()
+    text = f"{title} {msg}"
 
-        # Apply the opened_before ceiling to the probe query so we discover the
-        # window only within the requested date range.
-        probe_parts = list(base_parts)
-        if args.opened_before:
-            probe_parts.append(f"created:<={args.opened_before.strftime('%Y-%m-%d')}")
-        probe_query = " ".join(probe_parts)
+    # Explicit CVE or Advisory match
+    if cve_id and cve_id.lower() in text:
+        score += 35
+        factors.append(f"Explicitly mentions {cve_id} (+35)")
+    elif "ghsa-" in text:
+        score += 25
+        factors.append("Mentions GitHub Security Advisory (GHSA) (+25)")
 
-        logger.info("Determining time window for query: %s", probe_query)
-        earliest_ts, latest_ts = _get_time_window(pool, probe_query)
+    # Security terminology
+    matched_sec_kw = [kw for kw in SECURITY_KEYWORDS if kw in text]
+    if matched_sec_kw:
+        bonus = min(25, 10 + len(matched_sec_kw) * 5)
+        score += bonus
+        factors.append(f"Security terminology found: {', '.join(matched_sec_kw[:3])} (+{bonus})")
 
-        if earliest_ts is None or latest_ts is None:
-            logger.warning("Could not determine time window for language=%s; skipping.", lang)
+    # Refactor / non-security terminology (when lacking security terminology)
+    if not matched_sec_kw:
+        matched_ref_kw = [kw for kw in REFACTOR_KEYWORDS if kw in title]
+        if matched_ref_kw:
+            score -= 25
+            factors.append(f"Refactor/maintenance title without security terms: '{matched_ref_kw[0]}' (-25)")
+
+    # 3. Detection Method
+    if detection_method in ("commits_api", "commit_message"):
+        score += 10
+        factors.append("Authoritatively linked via commit git DAG / merge message (+10)")
+    elif detection_method == "search_api":
+        score -= 20
+        factors.append("Matched via loose search API (susceptible to quoted hashes) (-20)")
+
+    score = max(0, min(100, score))
+
+    if score >= 75:
+        tier = "HIGH"
+    elif score >= 50:
+        tier = "MEDIUM"
+    elif score >= 30:
+        tier = "LOW"
+    else:
+        tier = "SUSPICIOUS"
+
+    return {
+        "confidence_score": score,
+        "confidence_tier": tier,
+        "confidence_factors": factors,
+    }
+
+
+def find_pull_requests_for_commit(
+    pool: TokenPool,
+    owner: str,
+    repo: str,
+    commit_sha: str,
+    cve_id: Optional[str] = None,
+    commit_message: Optional[str] = None,
+    allow_search_api: bool = False,
+    max_retries: int = 3,
+) -> Dict[str, Any]:
+    """
+    Attempt to find GitHub PR link(s) for a given commit SHA.
+
+    Returns a dict with:
+      - status: 'found', 'not_found', 'repo_not_found', 'commit_not_found', 'error'
+      - method: 'commits_api', 'commit_message', 'search_api', or None
+      - pull_requests: list of PR summaries with confidence scores
+      - code_changes: list of file changes with vulnerable vs fixed code
+      - error_message: error description if any
+    """
+    result: Dict[str, Any] = {
+        "status": "not_found",
+        "method": None,
+        "pull_requests": [],
+        "code_changes": [],
+        "error_message": None,
+    }
+
+    retries = 0
+    while retries <= max_retries:
+        client = pool.get(category="core")
+        try:
+            gh_repo = client.get_repo(f"{owner}/{repo}")
+            gh_commit = gh_repo.get_commit(commit_sha)
+
+            # Strategy 1: GitHub Commits API (/repos/{owner}/{repo}/commits/{sha}/pulls)
+            try:
+                pulls = list(gh_commit.get_pulls())
+                if pulls:
+                    result["status"] = "found"
+                    result["method"] = "commits_api"
+                    prs = []
+                    for pr in pulls:
+                        pr_dict = {
+                            "number": pr.number,
+                            "url": pr.html_url,
+                            "title": pr.title,
+                            "state": pr.state,
+                            "merged": pr.merged,
+                            "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                        }
+                        conf = calculate_pr_confidence(
+                            cve_id=cve_id,
+                            pr_data=pr_dict,
+                            commit_msg=gh_commit.commit.message or commit_message,
+                            detection_method="commits_api",
+                        )
+                        pr_dict.update(conf)
+                        prs.append(pr_dict)
+
+                    result["pull_requests"] = prs
+                    result["code_changes"] = extract_commit_code_changes(gh_commit)
+                    return result
+            except Exception as e:
+                logger.debug("get_pulls() failed for %s/%s@%s: %s", owner, repo, commit_sha, e)
+
+            # Strategy 2: Extract PR numbers from commit message
+            msg = gh_commit.commit.message or commit_message
+            pr_numbers = extract_pr_numbers_from_message(msg)
+            if pr_numbers:
+                found_prs = []
+                for pr_num in pr_numbers:
+                    try:
+                        pr = gh_repo.get_pull(pr_num)
+                        found_prs.append(
+                            {
+                                "number": pr.number,
+                                "url": pr.html_url,
+                                "title": pr.title,
+                                "state": pr.state,
+                                "merged": pr.merged,
+                                "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                            }
+                        )
+                    except GithubException as ge:
+                        if ge.status == 404:
+                            continue
+                        raise
+
+                if found_prs:
+                    prs = []
+                    for pr_data in found_prs:
+                        conf = calculate_pr_confidence(
+                            cve_id=cve_id,
+                            pr_data=pr_data,
+                            commit_msg=gh_commit.commit.message or commit_message,
+                            detection_method="commit_message",
+                        )
+                        pr_data.update(conf)
+                        prs.append(pr_data)
+
+                    result["status"] = "found"
+                    result["method"] = "commit_message"
+                    result["pull_requests"] = prs
+                    result["code_changes"] = extract_commit_code_changes(gh_commit)
+                    return result
+
+            # Strategy 3: GitHub Search API fallback
+            if allow_search_api:
+                search_client = pool.get(category="search")
+                try:
+                    search_query = f"repo:{owner}/{repo} is:pr {commit_sha}"
+                    search_results = list(search_client.search_issues(search_query)[:3])
+                    if search_results:
+                        result["status"] = "found"
+                        result["method"] = "search_api"
+                        prs = []
+                        for issue in search_results:
+                            pr_data = {
+                                "number": issue.number,
+                                "url": issue.html_url,
+                                "title": issue.title,
+                                "state": issue.state,
+                                "merged": getattr(issue, "pull_request", None) is not None,
+                            }
+                            conf = calculate_pr_confidence(
+                                cve_id=cve_id,
+                                pr_data=pr_data,
+                                commit_msg=gh_commit.commit.message or commit_message,
+                                detection_method="search_api",
+                            )
+                            pr_data.update(conf)
+                            prs.append(pr_data)
+
+                        result["pull_requests"] = prs
+                        result["code_changes"] = extract_commit_code_changes(gh_commit)
+                        return result
+                except RateLimitExceededException:
+                    pool.mark_rate_limited(search_client, category="search")
+                except Exception as se:
+                    logger.debug("Search API error for %s/%s@%s: %s", owner, repo, commit_sha, se)
+
+            # No PR found through any strategy
+            result["status"] = "not_found"
+            return result
+
+        except RateLimitExceededException:
+            pool.mark_rate_limited(client, category="core")
+            retries += 1
             continue
 
-        logger.info(
-            "Time window for language=%s: %s .. %s",
-            lang,
-            earliest_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            latest_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        except GithubException as ge:
+            if ge.status in (403, 429) and "rate limit" in str(ge).lower():
+                pool.mark_rate_limited(client, category="core")
+                retries += 1
+                continue
+            elif ge.status == 404 or (ge.status == 422 and "commit" in str(ge).lower()):
+                # Differentiate between repo 404 and commit 404/422
+                error_body = str(ge.data) if hasattr(ge, "data") else str(ge)
+                if "commit" in error_body.lower():
+                    result["status"] = "commit_not_found"
+                else:
+                    result["status"] = "repo_not_found"
+                result["error_message"] = error_body
+                return result
+            elif ge.status == 451:
+                result["status"] = "unavailable_dmca"
+                result["error_message"] = "Repository or commit unavailable for legal reasons (DMCA)"
+                return result
+            else:
+                result["status"] = "error"
+                result["error_message"] = f"GitHub API error {ge.status}: {ge.data if hasattr(ge, 'data') else str(ge)}"
+                return result
+
+        except Exception as e:
+            result["status"] = "error"
+            result["error_message"] = str(e)
+            return result
+
+    result["status"] = "error"
+    result["error_message"] = "Max retries exceeded due to rate limits"
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main Mining Process
+# ---------------------------------------------------------------------------
+def mine_prs_from_cvefixes(
+    provider: CVEfixesDatabase | SampleCVEfixesProvider,
+    token_pool: TokenPool,
+    limit: int = 100,
+    output_path: Path = Path("cvefixes_pr_links.json"),
+    found_output_path: Path = Path("found_pr_links.json"),
+    allow_search_api: bool = False,
+    order: str = "default",
+    min_year: Optional[int] = None,
+):
+    """Fetch fixing commits from CVEfixes and resolve GitHub PR links for the first `limit` items."""
+    logger.info("Extracting fixing commits from CVEfixes (limit=%d, order=%s, min_year=%s)...", limit, order, min_year)
+    if isinstance(provider, CVEfixesDatabase):
+        commits: List[FixingCommit] = provider.get_fixing_commits(limit=limit, order=order, min_year=min_year)
+    else:
+        commits: List[FixingCommit] = provider.get_fixing_commits(limit=limit)
+
+    if not commits:
+        logger.warning("No commits returned from CVEfixes data source.")
+        return
+
+    logger.info("Processing %d commits to find GitHub pull requests...", len(commits))
+    results: List[Dict[str, Any]] = []
+
+    stats = {
+        "total": len(commits),
+        "found": 0,
+        "not_found": 0,
+        "non_github": 0,
+        "repo_not_found": 0,
+        "commit_not_found": 0,
+        "error": 0,
+    }
+
+    start_time = time.time()
+
+    for idx, commit in enumerate(commits, start=1):
+        cve_tag = f"[{commit.cve_id}] " if commit.cve_id else ""
+        short_hash = commit.commit_hash[:8] if commit.commit_hash else "unknown"
+
+        record: Dict[str, Any] = {
+            "index": idx,
+            "cve_id": commit.cve_id,
+            "commit_hash": commit.commit_hash,
+            "repo_url": commit.repo_url,
+            "owner": commit.owner,
+            "repo": commit.repo_name,
+            "pr_status": "pending",
+            "detection_method": None,
+            "pull_requests": [],
+            "error": None,
+        }
+
+        # Check if repository is GitHub
+        if not commit.owner or not commit.repo_name:
+            # Check if repo_url can be parsed
+            parsed = parse_github_repo(commit.repo_url)
+            if parsed:
+                commit.owner, commit.repo_name = parsed
+            else:
+                record["pr_status"] = "non_github_repository"
+                stats["non_github"] += 1
+                logger.info(
+                    "[%d/%d] %s%s @ %s -> Skipped (non-GitHub repo: %s)",
+                    idx,
+                    len(commits),
+                    cve_tag,
+                    commit.repo_url,
+                    short_hash,
+                    commit.repo_url,
+                )
+                results.append(record)
+                continue
+
+        # Look up PR for GitHub commit
+        res = find_pull_requests_for_commit(
+            pool=token_pool,
+            owner=commit.owner,
+            repo=commit.repo_name,
+            commit_sha=commit.commit_hash,
+            cve_id=commit.cve_id,
+            commit_message=commit.message,
+            allow_search_api=allow_search_api,
         )
 
-        # Format helpers
-        def _fmt(dt: datetime) -> str:
-            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        record["pr_status"] = res["status"]
+        record["detection_method"] = res["method"]
+        record["pull_requests"] = res["pull_requests"]
+        record["code_changes"] = res.get("code_changes", [])
+        record["error"] = res["error_message"]
 
-        # --- Paginated search loop ---
-        # Each iteration issues one search query covering earliest_ts..window_end.
-        # After each batch the window_end is set to the oldest timestamp seen,
-        # progressively narrowing the window toward the past.
-        window_end: datetime = latest_ts
-        expected_total: int | None = None
-        seen_before_lang = len(seen)
-
-        while True:
-            range_filter = f"created:{_fmt(earliest_ts)}..{_fmt(window_end)}"
-            parts = [p for p in base_parts if not p.startswith("created:")] + [range_filter]
-            query = " ".join(parts)
-
-            processed = len(seen) - seen_before_lang
+        if res["status"] == "found":
+            stats["found"] += 1
+            urls = ", ".join(pr["url"] for pr in res["pull_requests"])
+            top_score = max((pr.get("confidence_score", 0) for pr in res["pull_requests"]), default=0)
             logger.info(
-                "Searching GitHub with query: %s (processed so far: %d / %s)",
-                query,
-                processed,
-                str(expected_total) if expected_total is not None else "?",
+                "[%d/%d] %s%s/%s @ %s -> FOUND %d PR(s) [Score: %d] via %s: %s",
+                idx,
+                len(commits),
+                cve_tag,
+                commit.owner,
+                commit.repo_name,
+                short_hash,
+                len(res["pull_requests"]),
+                top_score,
+                res["method"],
+                urls,
+            )
+        elif res["status"] == "not_found":
+            stats["not_found"] += 1
+            logger.info(
+                "[%d/%d] %s%s/%s @ %s -> No PR found",
+                idx,
+                len(commits),
+                cve_tag,
+                commit.owner,
+                commit.repo_name,
+                short_hash,
+            )
+        elif res["status"] == "repo_not_found":
+            stats["repo_not_found"] += 1
+            logger.warning(
+                "[%d/%d] %s%s/%s @ %s -> Repository not found (404/deleted)",
+                idx,
+                len(commits),
+                cve_tag,
+                commit.owner,
+                commit.repo_name,
+                short_hash,
+            )
+        elif res["status"] == "commit_not_found":
+            stats["commit_not_found"] += 1
+            logger.warning(
+                "[%d/%d] %s%s/%s @ %s -> Commit not found in repository",
+                idx,
+                len(commits),
+                cve_tag,
+                commit.owner,
+                commit.repo_name,
+                short_hash,
+            )
+        else:
+            stats["error"] += 1
+            logger.error(
+                "[%d/%d] %s%s/%s @ %s -> Error: %s",
+                idx,
+                len(commits),
+                cve_tag,
+                commit.owner,
+                commit.repo_name,
+                short_hash,
+                res["error_message"],
             )
 
-            total_count, oldest_created_at = _scrape_search_page(pool, args, query, seen)
+        results.append(record)
 
-            if expected_total is None:
-                expected_total = total_count
-                logger.info("Total results reported by API: %d", expected_total)
+        # Periodically save incremental progress
+        if idx % 10 == 0 or idx == len(commits):
+            _save_results(output_path, results, stats, found_output_path)
 
-            processed = len(seen) - seen_before_lang
-            logger.info("Processed %d / %d unique results so far", processed, expected_total)
-
-            # Stop if the API returned nothing useful.
-            if oldest_created_at is None:
-                logger.info("No results returned; stopping search for language=%s", lang)
-                break
-
-            # Stop if we have accounted for (at least) the expected total.
-            if processed >= expected_total:
-                logger.info(
-                    "Collected %d results, meeting expected total of %d; done.",
-                    processed,
-                    expected_total,
-                )
-                break
-
-            # Narrow the window: move window_end back to the oldest timestamp seen.
-            if oldest_created_at >= window_end:
-                # No progress; avoid an infinite loop.
-                logger.info(
-                    "Window end unchanged (%s); cannot make further progress. "
-                    "Stopping search for language=%s.",
-                    _fmt(window_end),
-                    lang,
-                )
-                break
-            window_end = oldest_created_at
+    elapsed = time.time() - start_time
+    _print_summary(stats, elapsed, output_path, found_output_path)
 
 
-# ---------------------------------------------------------------------------
-# Main scraping loop
-# ---------------------------------------------------------------------------
-def scrape_repos(pool: TokenPool, repos: list[str], args):
-    """Scrape PRs from a list of repositories."""
-    for repo_full_name in repos:
-        logger.info("Scraping repository: %s", repo_full_name)
-        owner, _, repo_name = repo_full_name.partition("/")
-        if not repo_name:
-            logger.error("Invalid repository format '%s'; expected owner/repo", repo_full_name)
-            continue
+def _save_results(
+    output_path: Path,
+    results: List[Dict[str, Any]],
+    stats: Dict[str, int],
+    found_output_path: Optional[Path] = None,
+):
+    """Save results JSON with summary metadata, and write a found-only JSON file ordered by confidence score."""
+    payload = {
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "summary": stats,
+        "results": results,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
 
-        # Check language filter
-        if args.languages:
-            def _get_repo(client, rfn):
-                return client.get_repo(rfn)
-            try:
-                repo_obj = _call_with_retry(pool, _get_repo, repo_full_name)
-                repo_lang = repo_obj.language or ""
-                if repo_lang not in args.languages:
-                    logger.info(
-                        "Skipping %s (language=%s, not in %s)",
-                        repo_full_name, repo_lang, args.languages,
-                    )
-                    continue
-            except GithubException as exc:
-                logger.warning("Could not fetch repo info for %s: %s", repo_full_name, exc)
-                continue
+    if found_output_path:
+        found_entries = []
+        for r in results:
+            if r.get("pr_status") == "found" and r.get("pull_requests"):
+                prs = r.get("pull_requests", [])
+                best_conf = max((pr.get("confidence_score", 0) for pr in prs), default=0)
+                best_tier = prs[0].get("confidence_tier", "UNKNOWN") if prs else "UNKNOWN"
+                found_entries.append({
+                    "cve_id": r.get("cve_id"),
+                    "commit_hash": r.get("commit_hash"),
+                    "repo_url": r.get("repo_url"),
+                    "owner": r.get("owner"),
+                    "repo": r.get("repo"),
+                    "confidence_score": best_conf,
+                    "confidence_tier": best_tier,
+                    "pr_urls": [pr["url"] for pr in prs],
+                    "pull_requests": prs,
+                    "code_changes": r.get("code_changes", []),
+                    "detection_method": r.get("detection_method"),
+                })
 
-        def _list_prs(client, rfn):
-            return client.get_repo(rfn).get_pulls(
-                state="all", sort="created", direction="desc"
-            )
+        # Sort in order of confidence score (highest first)
+        found_entries.sort(key=lambda x: x.get("confidence_score", 0), reverse=True)
 
-        try:
-            pulls = _call_with_retry(pool, _list_prs, repo_full_name)
-        except GithubException as exc:
-            logger.warning("Could not list PRs for %s: %s", repo_full_name, exc)
-            continue
+        found_payload = {
+            "total_found": len(found_entries),
+            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+            "found_prs": found_entries,
+        }
+        found_output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(found_output_path, "w", encoding="utf-8") as f:
+            json.dump(found_payload, f, indent=2)
 
-        for pr in pulls:
-            # Stop early if PR is too new (PRs are sorted desc by creation)
-            if args.opened_before and pr.created_at.replace(tzinfo=timezone.utc) > args.opened_before:
-                continue
 
-            pr_dir = DATA_ROOT / owner / repo_name / str(pr.number)
-            skip_pr_dir = SKIPPED_DATA_ROOT / owner / repo_name / str(pr.number)
+def _print_summary(
+    stats: Dict[str, int],
+    elapsed: float,
+    output_path: Path,
+    found_output_path: Optional[Path] = None,
+):
+    """Print clean terminal summary of mining results."""
+    total = stats["total"]
+    found = stats["found"]
+    pct = (found / total * 100) if total > 0 else 0.0
 
-            # Skip if already fully scraped (JSON exists)
-            json_path = pr_dir / f"{pr.number}.json"
-            skip_json_path = skip_pr_dir / f"{pr.number}.json"
-            if not json_path.exists() and not skip_json_path.exists():
-                if not _pr_matches(pr, args):
-                    logger.debug("PR %s#%s failed to pass filters, skipping", repo_full_name, pr_number)
-                    skip_pr(pr, skip_pr_dir)
-                    continue
-                download_pr(pool, repo_full_name, pr, pr_dir)
-            else:
-                logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr.number)
-
-            if args.reviews:
-                reviews_dir = pr_dir / "reviews"
-                if not reviews_dir.exists():
-                    download_reviews(pool, pr, reviews_dir)
-
-            if args.comments:
-                download_comments(pool, pr, pr_dir)
+    print("\n" + "=" * 60)
+    print(" CVEfixes GitHub Pull Request Miner - Summary Report")
+    print("=" * 60)
+    print(f" Total commits processed:        {total}")
+    print(f" PRs successfully found:         {found} ({pct:.1f}%)")
+    print(f" No PR associated:               {stats['not_found']}")
+    print(f" Non-GitHub repositories:        {stats['non_github']}")
+    print(f" Repository not found (404):     {stats['repo_not_found']}")
+    print(f" Commit not found in repo:       {stats['commit_not_found']}")
+    print(f" Other errors:                   {stats['error']}")
+    print(f" Total time elapsed:             {elapsed:.1f} seconds")
+    print(f" All results saved to:           {output_path.resolve()}")
+    if found_output_path:
+        print(f" Found PRs saved to:             {found_output_path.resolve()}")
+    print("=" * 60 + "\n")
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-def parse_args(argv=None):
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Mine GitHub pull request data.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        description="Mine GitHub Pull Request links from CVEfixes fixing commits."
     )
-
     parser.add_argument(
-        "repos",
-        nargs="*",
-        metavar="owner/repo",
-        help="Repositories to scrape (e.g. torvalds/linux). Not required when "
-             "--reviews, --comments, --timeline, or --commits is used alone to backfill existing data.",
+        "--db-path",
+        type=str,
+        default=None,
+        help="Path to CVEfixes SQLite database file (e.g. CVEfixes.db).",
     )
-
-    # Filtering
-    filter_group = parser.add_argument_group("filtering")
-    filter_group.add_argument(
-        "--languages",
-        nargs="+",
-        default=list(DEFAULT_LANGUAGES),
-        metavar="LANG",
-        help="Only include repos written in these languages (default: %(default)s). "
-             "Pass an empty string to disable language filtering.",
+    parser.add_argument(
+        "--sql-dump",
+        type=str,
+        default=None,
+        help="Path to CVEfixes SQL dump file (e.g. cvefixes.sql).",
     )
-    filter_group.add_argument(
-        "--min-participants",
+    parser.add_argument(
+        "--limit",
+        "-n",
         type=int,
-        default=DEFAULT_MIN_PARTICIPANTS,
-        dest="min_participants",
-        metavar="N",
-        help="Minimum number of unique participants (default: %(default)s).",
-    )
-    filter_group.add_argument(
-        "--keywords",
-        nargs="+",
-        default=DEFAULT_KEYWORDS,
-        metavar="KW",
-        help="Keywords to search for in PR title/body (default: %(default)s).",
-    )
-    filter_group.add_argument(
-        "--opened-before",
-        default=DEFAULT_OPENED_BEFORE.isoformat(),
-        dest="opened_before_str",
-        metavar="ISO_DATE",
-        help="Only include PRs opened before this date (default: %(default)s).",
-    )
-    filter_group.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume mining using the oldest date of existing PRs.",
-    )
-    filter_group.add_argument(
-        "--no-language-filter",
-        action="store_true",
-        dest="no_language_filter",
-        help="Disable language filtering entirely.",
-    )
-
-    # Modes
-    mode_group = parser.add_argument_group("modes")
-    mode_group.add_argument(
-        "--reviews",
-        action="store_true",
-        help="Download (or backfill) PR reviews.",
-    )
-    mode_group.add_argument(
-        "--comments",
-        action="store_true",
-        help="Download (or backfill) PR review comments.",
-    )
-    mode_group.add_argument(
-        "--timeline",
-        action="store_true",
-        help="Backfill PR issue timeline data (stored as timeline.json).",
-    )
-    mode_group.add_argument(
-        "--commits",
-        action="store_true",
-        help="Backfill PR commit metadata and diffs (stored in commits/).",
-    )
-
-    # Output
-    parser.add_argument(
-        "--data-dir",
-        default=str(DATA_ROOT),
-        dest="data_dir",
-        metavar="DIR",
-        help="Root directory for downloaded data (default: %(default)s).",
+        default=100,
+        help="Number of commits to process from CVEfixes (default: 100).",
     )
     parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable debug logging.",
+        "--output",
+        "-o",
+        type=str,
+        default="cvefixes_pr_links.json",
+        help="Path to output JSON file (default: cvefixes_pr_links.json).",
     )
+    parser.add_argument(
+        "--found-output",
+        type=str,
+        default="found_pr_links.json",
+        help="Path to output JSON file containing only found PRs (default: found_pr_links.json).",
+    )
+    parser.add_argument(
+        "--token",
+        type=str,
+        default=None,
+        help="GitHub personal access token(s), comma-separated. Overrides .env.",
+    )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Use built-in sample CVE fixing commits for testing without a database.",
+    )
+    parser.add_argument(
+        "--order",
+        choices=["default", "recent"],
+        default="default",
+        help="Order to query commits: 'default' (natural dump order starting 1999) or 'recent' (newest CVEs first).",
+    )
+    parser.add_argument(
+        "--min-year",
+        type=int,
+        default=None,
+        help="Filter CVEs to only those published in or after MIN_YEAR (e.g. 2020).",
+    )
+    parser.add_argument(
+        "--use-search-api",
+        action="store_true",
+        default=False,
+        help="Enable GitHub Search API fallback (disabled by default to prevent false positives where commit hashes are quoted in comments).",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose debug logging.",
+    )
+    return parser
 
-    args = parser.parse_args(argv)
 
-    # Post-process
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # resume based on date of oldest PR
-    if args.resume:
-        args.opened_before_str = _find_oldest_pr(args)
-        logger.info("Resumed search starting at %s", args.opened_before_str)
+    tokens = load_github_tokens(args.token)
+    token_pool = TokenPool(tokens)
 
-    # Parse opened_before
-    try:
-        dt = datetime.fromisoformat(args.opened_before_str.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        args.opened_before = dt
-    except ValueError as exc:
-        parser.error(f"Invalid --opened-before date: {exc}")
-
-    # Language set (empty string disables filtering)
-    if args.no_language_filter or args.languages == [""]:
-        args.languages = set()
+    if args.sample:
+        provider = SampleCVEfixesProvider()
     else:
-        args.languages = set(args.languages)
+        try:
+            provider = CVEfixesDatabase(
+                db_path=args.db_path,
+                sql_dump_path=args.sql_dump,
+            )
+            # Verify database accessibility
+            _ = provider.connect()
+        except FileNotFoundError as e:
+            logger.error("%s", e)
+            print("\n[NOTE] CVEfixes data file not detected.")
+            print("While your data is still downloading, you can run with `--sample` to test the pipeline:")
+            print("    python pr-miner.py --sample --limit 5\n")
+            sys.exit(1)
 
-    return args
-
-
-def main(argv=None):
-    args = parse_args(argv)
-
-    global DATA_ROOT
-    DATA_ROOT = Path(args.data_dir)
-
-    # Load tokens
-    raw = os.environ.get("GH_TOKEN_LIST", "")
-    tokens = [t.strip() for t in raw.split(",") if t.strip()]
-    if not tokens:
-        logger.error(
-            "No GitHub tokens found. Set GH_TOKEN_LIST in your environment or .env file."
-        )
-        sys.exit(1)
-
-    # Validate token format: must start with "ghp_" followed by 36 alphanumeric chars
-    _token_re = re.compile(r'^ghp_[A-Za-z0-9]{36}$')
-    invalid = [t for t in tokens if not _token_re.match(t)]
-    if invalid:
-        logger.error(
-            "Invalid GitHub token(s) detected (expected ghp_ + 36 alphanumeric chars): %s",
-            ", ".join(invalid),
-        )
-        sys.exit(1)
-
-    pool = TokenPool(tokens)
-
-    if not args.repos:
-        if args.reviews or args.comments or args.timeline or args.commits:
-            # Backfill-only mode: walk existing data
-            if args.reviews:
-                backfill_reviews(pool, args)
-            if args.comments:
-                backfill_comments(pool, args)
-            if args.timeline:
-                backfill_timeline(pool, args)
-            if args.commits:
-                backfill_commits(pool, args)
-        else:
-            # No repos and no backfill flags: use GitHub search API
-            scrape_via_search(pool, args)
-    else:
-        scrape_repos(pool, args.repos, args)
+    output_file = Path(args.output)
+    found_output_file = Path(args.found_output)
+    mine_prs_from_cvefixes(
+        provider=provider,
+        token_pool=token_pool,
+        limit=args.limit,
+        output_path=output_file,
+        found_output_path=found_output_file,
+        allow_search_api=args.use_search_api,
+        order=args.order,
+        min_year=args.min_year,
+    )
 
 
 if __name__ == "__main__":
