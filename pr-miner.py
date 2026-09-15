@@ -783,7 +783,7 @@ def scrape_repos(pool: TokenPool, repos: list[str], args):
             skip_json_path = skip_pr_dir / f"{pr.number}.json"
             if not json_path.exists() and not skip_json_path.exists():
                 if not _pr_matches(pr, args):
-                    logger.debug("PR %s#%s failed to pass filters, skipping", repo_full_name, pr_number)
+                    logger.debug("PR %s#%s failed to pass filters, skipping", repo_full_name, pr.number)
                     skip_pr(pr, skip_pr_dir)
                     continue
                 download_pr(pool, repo_full_name, pr, pr_dir)
