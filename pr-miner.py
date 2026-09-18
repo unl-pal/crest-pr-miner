@@ -631,6 +631,8 @@ def scrape_via_search(pool: TokenPool, args):
     """
     # Build base search query (no date filter yet — that is added per window)
     query_parts = ["is:pr"]
+    if not args.allow_dependabot:
+        query_parts.append("-author:dependabot[bot]")
 
     # Keyword filter: search for any keyword in the title/body
     keyword_clause = " OR ".join(f'"{kw}"' for kw in args.keywords)
@@ -859,6 +861,12 @@ def parse_args(argv=None):
         action="store_true",
         dest="no_language_filter",
         help="Disable language filtering entirely.",
+    )
+    filter_group.add_argument(
+        "--allow-dependabot",
+        action="store_true",
+        dest="allow_dependabot",
+        help="Do not filter out PRs from dependabot.",
     )
 
     # Modes
