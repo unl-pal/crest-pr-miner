@@ -633,6 +633,7 @@ def scrape_via_search(pool: TokenPool, args):
     query_parts = ["is:pr"]
     if not args.allow_dependabot:
         query_parts.append("-author:dependabot[bot]")
+        query_parts.append("-author:dependabot-preview[bot]")
 
     # Keyword filter: search for any keyword in the title/body
     keyword_clause = " OR ".join(f'"{kw}"' for kw in args.keywords)
