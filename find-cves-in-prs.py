@@ -25,6 +25,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -37,6 +42,18 @@ CVE_DATA_ROOT = Path("cves")
 CVE_ID_RE = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 DOWNLOADER_SCRIPT = Path(__file__).resolve().parent / "cve-downloader.py"
 
+NVD_API_KEY = os.environ.get("NVD_API_KEY")
+# NVD allows 5 req/30s without a key, 50 req/30s with one. Pace requests
+# to stay under that rather than relying on 429 retries.
+_MIN_REQUEST_INTERVAL = 0.7 if NVD_API_KEY else 6.5
+_last_request_at = 0.0
+
+def _rate_limit():
+    global _last_request_at
+    elapsed = time.monotonic() - _last_request_at
+    if elapsed < _MIN_REQUEST_INTERVAL:
+        time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+    _last_request_at = time.monotonic()
 
 def find_cve_ids(data_dir: Path) -> set[str]:
     """Scan every non-.diff file under data_dir and return the set of distinct CVE IDs mentioned."""
@@ -72,6 +89,7 @@ def download_cve(cve_id: str, cve_data_dir: Path, force: bool, skip_history: boo
     if skip_history:
         cmd.append("--skip-history")
 
+    _rate_limit()
     result = subprocess.run(cmd)
     if result.returncode != 0:
         logger.warning("%s: cve-downloader.py exited with code %d", cve_id, result.returncode)
