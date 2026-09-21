@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import re
 import subprocess
@@ -59,14 +60,24 @@ def find_cve_ids(data_dir: Path) -> set[str]:
     """Scan every non-.diff file under data_dir and return the set of distinct CVE IDs mentioned."""
     cve_ids: set[str] = set()
     files_scanned = 0
-    files_skipped = 0
 
-    for file_path in data_dir.rglob("*"):
+    for file_path in data_dir.rglob("[0-9]*.json"):
         if not file_path.is_file():
             continue
-        if file_path.suffix == ".diff":
-            files_skipped += 1
-            continue
+
+        file_path = file_path.resolve()
+        local_cves = []
+
+        cvefile = file_path
+        if '/reviews/' in str(file_path) or '/commits/' in str(file_path):
+            cvefile = file_path.parent
+        cvefile = cvefile.parent / "cves.json"
+
+        if cvefile.exists():
+            logger.info("Loaded cached results %s", cvefile)
+            with open(cvefile, 'r') as f:
+                cvedata = json.load(f)
+            local_cves = cvedata['cves']
 
         try:
             text = file_path.read_text(encoding="utf-8", errors="ignore")
@@ -75,9 +86,14 @@ def find_cve_ids(data_dir: Path) -> set[str]:
             continue
 
         files_scanned += 1
-        cve_ids.update(match.upper() for match in CVE_ID_RE.findall(text))
+        logger.info("Scanned file %s", file_path)
+        local_cves.extend(match.upper() for match in CVE_ID_RE.findall(text))
+        with cvefile.open("w", encoding="utf-8") as f:
+            json.dump({ 'cves': local_cves }, f, indent=2)
 
-    logger.info("Scanned %d files (%d .diff files skipped)", files_scanned, files_skipped)
+        cve_ids.update(local_cves)
+
+    logger.info("Scanned %d files", files_scanned)
     return cve_ids
 
 
