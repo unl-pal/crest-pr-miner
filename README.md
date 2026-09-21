@@ -144,3 +144,37 @@ options:
 ```
 
 Reruns are safe: existing files are skipped unless `--force` is passed.
+
+# Find CVEs in PRs
+
+Scans every mined PR under `data/` for CVE ID mentions, then invokes
+`cve-downloader.py` for each distinct CVE found so its metadata gets
+downloaded. Every file in a PR's directory is scanned as plain text
+(not schema-aware JSON parsing) except `*.diff` files, which are excluded
+since they include unchanged surrounding context lines that can produce
+false matches unrelated to that PR.
+
+Requires `cve-downloader.py` to be present alongside this script.
+
+Usage:
+```
+    python find-cves-in-prs.py [options]
+```
+
+## Usage
+
+usage: find-cves-in-prs.py [-h] [--data-dir DATA_DIR]
+                           [--cve-data-dir CVE_DATA_DIR] [--force]
+                           [--skip-history] [--verbose]
+
+options:
+  -h, --help            show this help message and exit
+  --data-dir DATA_DIR   Root directory of mined PR data (default: data).
+  --cve-data-dir CVE_DATA_DIR
+                        Root directory passed to cve-downloader.py for
+                        downloaded CVE data (default: cves).
+  --force               Pass --force through to cve-downloader.py to
+                        re-fetch and overwrite existing files.
+  --skip-history        Pass --skip-history through to cve-downloader.py.
+  --verbose, -v         Enable debug logging.
+```
