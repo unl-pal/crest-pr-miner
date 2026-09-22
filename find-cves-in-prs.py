@@ -90,7 +90,7 @@ def find_cve_ids(data_dir: Path) -> set[str]:
         logger.info("Scanned file %s", file_path)
         local_cves.extend(match.upper() for match in CVE_ID_RE.findall(text))
         with cvefile.open("w", encoding="utf-8") as f:
-            json.dump({ 'cves': local_cves }, f, indent=2)
+            json.dump({ 'cves': list(set(local_cves)) }, f, indent=2)
 
         cve_ids.update(local_cves)
 
