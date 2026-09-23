@@ -151,6 +151,7 @@ activemq-data/
 
 # Downloaded PR data
 data/*
+skipped/*
 !data/.gitkeep
 
 # Downloaded CWE catalog data
