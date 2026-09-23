@@ -76,9 +76,12 @@ def find_cve_ids(data_dir: Path) -> set[str]:
 
         if cvefile.exists():
             logger.info("Loaded cached results %s", cvefile)
-            with open(cvefile, 'r') as f:
-                cvedata = json.load(f)
-            local_cves = cvedata['cves']
+            try:
+                with open(cvefile, 'r') as f:
+                    cvedata = json.load(f)
+                local_cves = cvedata['cves']
+            except Exception as e:
+                logger.warning('problem with JSON file %s: %s', cvefile, e)
 
         try:
             text = file_path.read_text(encoding="utf-8", errors="ignore")
