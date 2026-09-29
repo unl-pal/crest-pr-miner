@@ -56,6 +56,7 @@ filtering:
   --no-language-filter  Disable language filtering entirely.
 
 modes:
+  --diffs               Download (or backfill) PR diffs.
   --reviews             Download (or backfill) PR reviews.
   --comments            Download (or backfill) PR review comments.
   --timeline            Backfill PR issue timeline data (stored as timeline.json).
