@@ -30,8 +30,12 @@ a per-PR cwes.json, keyed by CWE ID, recording where each one came from:
        picked up. NVD placeholder values like NVD-CWE-noinfo aren't
        real CWE IDs and don't match.
 
+CWE IDs are normalized (e.g. CWE-01 -> CWE-1), and only CWEs that exist,
+i.e. have metadata downloaded by cwe-miner.py under cwes/weakness/,
+cwes/category/ or cwes/view/, are kept; the rest are dropped.
+
 Usage:
-    python find-cwes-in-prs.py [--data-dir DIR] [--cve-data-dir DIR] [--verbose]
+    python find-cwes-in-prs.py [--data-dir DIR] [--cve-data-dir DIR] [--cwe-data-dir DIR] [--verbose]
 """
 
 import argparse
@@ -50,7 +54,9 @@ logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("data")
 CVE_DATA_ROOT = Path("cves")
-CWE_ID_RE = re.compile(r"CWE-\d+", re.IGNORECASE)
+CWE_DATA_ROOT = Path("cwes")
+CWE_TYPES = ("weakness", "category", "view")
+CWE_ID_RE = re.compile(r"CWE-(\d+)", re.IGNORECASE)
 
 OUTPUT_FILENAMES = {"cwes.json", "cves.json"}
 
@@ -63,8 +69,20 @@ def find_pr_dirs(data_dir: Path):
                 yield pr_dir
 
 
+def normalize_cwe_id(number: str) -> str:
+    """Return the canonical CWE ID for a CWE number, e.g. "01" -> "CWE-1"."""
+    return f"CWE-{int(number)}"
+
+
+def is_valid_cwe(cwe_id: str, cwe_data_dir: Path) -> bool:
+    """Return True if cwe_id (normalized, e.g. "CWE-79") has downloaded
+    metadata under any of the cwe-miner.py subdirectories of cwe_data_dir."""
+    filename = f"{cwe_id.lower()}.json"
+    return any((cwe_data_dir / cwe_type / filename).is_file() for cwe_type in CWE_TYPES)
+
+
 def find_cwe_ids(text: str) -> set[str]:
-    return {match.upper() for match in CWE_ID_RE.findall(text)}
+    return {normalize_cwe_id(number) for number in CWE_ID_RE.findall(text)}
 
 
 def cwes_in_pr_files(pr_dir: Path) -> set[str]:
@@ -104,18 +122,20 @@ def cwes_in_cve_metadata(cve_id: str, cve_data_dir: Path) -> set[str]:
     return find_cwe_ids(metadata_path.read_text(encoding="utf-8", errors="ignore"))
 
 
-def process_pr(pr_dir: Path, cve_data_dir: Path) -> int:
-    """Write cwes.json for pr_dir. Returns the number of distinct CWEs found."""
+def process_pr(pr_dir: Path, cve_data_dir: Path, cwe_data_dir: Path) -> int:
+    """Write cwes.json for pr_dir. Returns the number of distinct valid CWEs found."""
     mentioned = cwes_in_pr_files(pr_dir)
     via_cves: dict[str, set[str]] = {}
     for cve_id in load_pr_cves(pr_dir):
         for cwe_id in cwes_in_cve_metadata(cve_id, cve_data_dir):
             via_cves.setdefault(cwe_id, set()).add(cve_id)
 
-    cwes_out = {
-        cwe_id: {"mentioned": cwe_id in mentioned, "via_cves": sorted(via_cves.get(cwe_id, ()))}
-        for cwe_id in sorted(mentioned | via_cves.keys())
-    }
+    cwes_out = {}
+    for cwe_id in sorted(mentioned | via_cves.keys()):
+        if not is_valid_cwe(cwe_id, cwe_data_dir):
+            logger.debug("%s: dropping %s, no metadata in %s", pr_dir, cwe_id, cwe_data_dir)
+            continue
+        cwes_out[cwe_id] = {"mentioned": cwe_id in mentioned, "via_cves": sorted(via_cves.get(cwe_id, ()))}
     (pr_dir / "cwes.json").write_text(json.dumps(cwes_out, indent=2), encoding="utf-8")
     return len(cwes_out)
 
@@ -124,6 +144,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Find CWE mentions in each mined PR and in the metadata of the CVEs it mentions.")
     parser.add_argument("--data-dir", type=Path, default=DATA_ROOT, help=f"Root directory of mined PR data (default: {DATA_ROOT}).")
     parser.add_argument("--cve-data-dir", type=Path, default=CVE_DATA_ROOT, help=f"Root directory of downloaded CVE metadata, see cve-downloader.py (default: {CVE_DATA_ROOT}).")
+    parser.add_argument("--cwe-data-dir", type=Path, default=CWE_DATA_ROOT, help=f"Root directory of downloaded CWE metadata, see cwe-miner.py (default: {CWE_DATA_ROOT}).")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
     args = parser.parse_args(argv)
 
@@ -134,12 +155,16 @@ def main(argv=None):
         logger.error("Data directory %s does not exist", args.data_dir)
         return 1
 
+    if not args.cwe_data_dir.exists():
+        logger.error("CWE data directory %s does not exist, run cwe-miner.py first", args.cwe_data_dir)
+        return 1
+
     pr_dirs = list(find_pr_dirs(args.data_dir))
     logger.info("Found %d PR directories", len(pr_dirs))
 
     total_cwes = 0
     for pr_dir in pr_dirs:
-        n_cwes = process_pr(pr_dir, args.cve_data_dir)
+        n_cwes = process_pr(pr_dir, args.cve_data_dir, args.cwe_data_dir)
         logger.debug("%s: %d CWE(s)", pr_dir, n_cwes)
         total_cwes += n_cwes
 

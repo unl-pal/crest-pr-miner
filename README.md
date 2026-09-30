@@ -4,7 +4,7 @@ Downloads GitHub PR data (JSON, diffs, reviews, comments) with automatic
 token rotation when rate limits are hit.
 
 Usage:
-```
+```sh
     python pr-miner.py [options] <repo1> [<repo2> ...]
 ```
 
@@ -69,7 +69,7 @@ public REST API (`cwe-api.mitre.org`) — no XML parsing, no credentials
 required.
 
 Usage:
-```
+```sh
     python cwe-miner.py [options]
 ```
 
@@ -107,7 +107,7 @@ Downloads a single CVE's metadata and change history from NVD's public
 REST API (`services.nvd.nist.gov`), given its ID.
 
 Usage:
-```
+```sh
     python cve-downloader.py CVE-2021-44228 [options]
 ```
 
@@ -157,12 +157,13 @@ false matches unrelated to that PR.
 Requires `cve-downloader.py` to be present alongside this script.
 
 Usage:
-```
+```sh
     python find-cves-in-prs.py [options]
 ```
 
 ## Usage
 
+```
 usage: find-cves-in-prs.py [-h] [--data-dir DATA_DIR]
                            [--cve-data-dir CVE_DATA_DIR] [--force]
                            [--skip-history] [--verbose]
@@ -178,3 +179,64 @@ options:
   --skip-history        Pass --skip-history through to cve-downloader.py.
   --verbose, -v         Enable debug logging.
 ```
+
+# Find CWEs in PRs
+
+For every mined PR under `data/`, collects CWE IDs from two sources and
+writes them to a per-PR `cwes.json`:
+
+1. **Direct mentions** in the PR's own JSON files (scanned as plain text,
+   recursively, including `reviews/` and `commits/`). `*.diff` files are
+   excluded, as are the output files `cves.json` and `cwes.json`.
+2. **Via CVEs**: CWE IDs mentioned in the downloaded NVD metadata
+   (`cves/<id>/<id>.json`) of every CVE listed in the PR's `cves.json`.
+   NVD placeholders like `NVD-CWE-noinfo` aren't real CWE IDs and don't
+   match.
+
+CWE IDs are normalized (e.g. `CWE-01` → `CWE-1`, `cwe-79` → `CWE-79`), and
+only CWEs that exist are kept: a CWE is valid if its metadata file is present
+under `cwes/weakness/`, `cwes/category/` or `cwes/view/`. Invalid CWEs are
+dropped (logged with `--verbose`).
+
+Requires, in order:
+- `cwe-miner.py` to have downloaded the CWE catalog into `cwes/`
+- `find-cves-in-prs.py` to have written each PR's `cves.json` (and
+  downloaded the CVE metadata into `cves/`)
+
+Usage:
+```sh
+    python find-cwes-in-prs.py [options]
+```
+
+Output, `data/<owner>/<repo>/<pr_id>/cwes.json`, is keyed by CWE ID and
+records where each one came from:
+```json
+{
+  "CWE-20":  {"mentioned": true,  "via_cves": ["CVE-2021-44228"]},
+  "CWE-400": {"mentioned": false, "via_cves": ["CVE-2021-44228"]},
+  "CWE-79":  {"mentioned": true,  "via_cves": []}
+}
+```
+`mentioned` is true if the CWE appears in the PR's own files (source 1);
+`via_cves` lists the CVEs whose metadata mentions it (source 2).
+
+## Usage
+
+```
+usage: find-cwes-in-prs.py [-h] [--data-dir DATA_DIR]
+                           [--cve-data-dir CVE_DATA_DIR]
+                           [--cwe-data-dir CWE_DATA_DIR] [--verbose]
+
+options:
+  -h, --help            show this help message and exit
+  --data-dir DATA_DIR   Root directory of mined PR data (default: data).
+  --cve-data-dir CVE_DATA_DIR
+                        Root directory of downloaded CVE metadata, see cve-
+                        downloader.py (default: cves).
+  --cwe-data-dir CWE_DATA_DIR
+                        Root directory of downloaded CWE metadata, see cwe-
+                        miner.py (default: cwes).
+  --verbose, -v         Enable debug logging.
+```
+
+Reruns are safe: each PR's `cwes.json` is regenerated from scratch.
