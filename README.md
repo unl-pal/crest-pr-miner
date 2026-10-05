@@ -56,6 +56,7 @@ filtering:
   --no-language-filter  Disable language filtering entirely.
 
 modes:
+  --diffs               Download (or backfill) PR diffs.
   --reviews             Download (or backfill) PR reviews.
   --comments            Download (or backfill) PR review comments.
   --timeline            Backfill PR issue timeline data (stored as timeline.json).
@@ -179,6 +180,11 @@ options:
   --skip-history        Pass --skip-history through to cve-downloader.py.
   --verbose, -v         Enable debug logging.
 ```
+
+# Filtering PRs
+
+We moved any PRs from Dependabot using `move-dependabot.py` and then filter
+any PRs that don't change a source file using `filter-prs.py`.
 
 # Find CWEs in PRs
 

@@ -130,7 +130,7 @@ class TokenPool:
         """Fetch the rate-limit reset time for *category* from the API."""
         try:
             rl = client.get_rate_limit()
-            print(json.dumps(rl))
+            logger.debug("rate limit data: " + json.dumps(rl))
             resource = getattr(rl, category, None)
             if resource is not None:
                 reset_ts = resource.reset
@@ -253,6 +253,28 @@ def skip_pr(pr, pr_dir: Path):
     json_path.write_text(json.dumps(pr.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def download_diff(pool: TokenPool, diff_url, diff_path: Path):
+    while True:
+        client = pool.get()
+        try:
+            req = urllib.request.Request(diff_url)
+            # Add auth if token available (avoids anonymous rate limits)
+            token = pool.get_token(client)
+            if token:
+                req.add_header("Authorization", f"token {token}")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                diff_path.write_bytes(resp.read())
+            logger.info("Saved %s", diff_path)
+            pool.update_rate_limit(client)
+            return
+        except Exception as exc:
+            logger.warning("Could not download diff for PR %s: %s", diff_path, exc)
+            if '503' in str(exc) or '429' in str(exc):
+                pool.mark_rate_limited(client)
+            else:
+                return
+
+
 def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
     """Download PR JSON and diff into pr_dir."""
     pr_dir.mkdir(parents=True, exist_ok=True)
@@ -266,19 +288,7 @@ def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
         logger.info("Saved %s", json_path)
 
     if not diff_path.exists():
-        diff_url = pr.diff_url
-        try:
-            req = urllib.request.Request(diff_url)
-            # Add auth if token available (avoids anonymous rate limits)
-            client = pool.get()
-            token = pool.get_token(client)
-            if token:
-                req.add_header("Authorization", f"token {token}")
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                diff_path.write_bytes(resp.read())
-            logger.info("Saved %s", diff_path)
-        except Exception as exc:
-            logger.warning("Could not download diff for PR %s: %s", pr_id, exc)
+        download_diff(pool, pr.diff_url, diff_path)
 
 
 def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
@@ -412,6 +422,22 @@ def download_commits(pool: TokenPool, pr, pr_dir: Path):
 # ---------------------------------------------------------------------------
 # Backfill reviews / comments from existing JSON files
 # ---------------------------------------------------------------------------
+def backfill_diffs(pool: TokenPool, args):
+    """Walk existing PR JSON files and download missing diffs."""
+    for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
+        diff_path = pr_dir / f"{pr_number}.diff"
+        if diff_path.exists():
+            continue
+        logger.info("Backfilling diff for %s PR #%s", repo_full_name, pr_number)
+        continue
+        json_path = pr_dir / f"{pr_number}.json"
+        try:
+            pr_data = json.loads(json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        download_diff(pool, pr_data['diff_url'], diff_path)
+
+
 def backfill_reviews(pool: TokenPool, args):
     """Walk existing PR JSON files and download missing reviews."""
     for pr_dir, repo_full_name, pr_number in _iter_pr_dirs():
@@ -817,7 +843,7 @@ def parse_args(argv=None):
         nargs="*",
         metavar="owner/repo",
         help="Repositories to scrape (e.g. torvalds/linux). Not required when "
-             "--reviews, --comments, --timeline, or --commits is used alone to backfill existing data.",
+             "--diffs, --reviews, --comments, --timeline, or --commits is used alone to backfill existing data.",
     )
 
     # Filtering
@@ -872,6 +898,11 @@ def parse_args(argv=None):
 
     # Modes
     mode_group = parser.add_argument_group("modes")
+    mode_group.add_argument(
+        "--diffs",
+        action="store_true",
+        help="Download (or backfill) PR diffs.",
+    )
     mode_group.add_argument(
         "--reviews",
         action="store_true",
@@ -964,8 +995,10 @@ def main(argv=None):
     pool = TokenPool(tokens)
 
     if not args.repos:
-        if args.reviews or args.comments or args.timeline or args.commits:
+        if args.diffs or args.reviews or args.comments or args.timeline or args.commits:
             # Backfill-only mode: walk existing data
+            if args.diffs:
+                backfill_diffs(pool, args)
             if args.reviews:
                 backfill_reviews(pool, args)
             if args.comments:
