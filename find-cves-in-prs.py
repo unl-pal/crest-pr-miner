@@ -6,12 +6,14 @@ Scans every mined PR under data/ for CVE ID mentions, then invokes
 cve-downloader.py for each distinct CVE found so its metadata (and
 history, unless skipped) gets downloaded.
 
-Every file in a PR's directory is scanned as plain text (regardless of
-its actual format - PR metadata, comments, reviews, timeline, commit
-metadata are all JSON, but this searches text rather than parsing each
-file's schema) except *.diff files, which are excluded: they include
-unchanged surrounding context lines, so a CVE mentioned elsewhere in a
-file would show up in a diff even when unrelated to that PR.
+Every *.json file in a PR's directory (recursively, including reviews/
+and commits/) is scanned as plain text rather than parsing each file's
+schema - PR metadata, comments, reviews, timeline and commit metadata
+are all JSON. The per-PR output files cves.json and cwes.json are
+skipped so re-runs don't feed back into themselves. *.diff files are
+excluded: they include unchanged surrounding context lines, so a CVE
+mentioned elsewhere in a file would show up in a diff even when
+unrelated to that PR.
 
 Usage:
     python find-cves-in-prs.py [--data-dir DIR] [--cve-data-dir DIR]
@@ -44,6 +46,8 @@ CVE_DATA_ROOT = Path("cves")
 CVE_ID_RE = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 DOWNLOADER_SCRIPT = Path(__file__).resolve().parent / "cve-downloader.py"
 
+OUTPUT_FILENAMES = {"cves.json", "cwes.json"}
+
 NVD_API_KEY = os.environ.get("NVD_API_KEY")
 # NVD allows 5 req/30s without a key, 50 req/30s with one. Pace requests
 # to stay under that rather than relying on 429 retries.
@@ -58,12 +62,12 @@ def _rate_limit():
     _last_request_at = time.monotonic()
 
 def find_cve_ids(data_dir: Path) -> set[str]:
-    """Scan every non-.diff file under data_dir and return the set of distinct CVE IDs mentioned."""
+    """Scan every .json file under data_dir (except per-PR output files) and return the set of distinct CVE IDs mentioned."""
     cve_ids: set[str] = set()
     files_scanned = 0
 
-    for file_path in data_dir.rglob("[0-9]*.json"):
-        if not file_path.is_file():
+    for file_path in data_dir.rglob("*.json"):
+        if not file_path.is_file() or file_path.name in OUTPUT_FILENAMES:
             continue
 
         file_path = file_path.resolve()
