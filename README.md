@@ -179,3 +179,8 @@ options:
   --skip-history        Pass --skip-history through to cve-downloader.py.
   --verbose, -v         Enable debug logging.
 ```
+
+# Filtering PRs
+
+We moved any PRs from Dependabot using `move-dependabot.py` and then filter
+any PRs that don't change a source file using `filter-prs.py`.
