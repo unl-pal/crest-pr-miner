@@ -170,6 +170,17 @@ def create_workbook(
             validation.add(sheet.cell(row=row, column=2))
             rater_rows[rater][pr_file] = row
 
+    validation = DataValidation(
+        type="list",
+        formula1='"SecurityRelated,NotSecurityRelated"',
+        allow_blank=True,
+    )
+    validation.errorTitle = "Invalid rating"
+    validation.error = "Choose SecurityRelated or NotSecurityRelated."
+    validation.showErrorMessage = True
+    validation.errorStyle = "stop"
+    summary.add_data_validation(validation)
+
     for row, (pr_file, assigned) in enumerate(zip(sampled_prs, assignments), start=2):
         url = pr_url(pr_file, data_dir)
         link = summary.cell(row=row, column=1, value=url)
@@ -200,6 +211,7 @@ def create_workbook(
             column=7,
             value=f'=IF(C{row}=E{row},C{row},"")',
         )
+        validation.add(summary.cell(row=row, column=7))
 
     summary.conditional_formatting.add(
         f"G2:G{summary.max_row}",
