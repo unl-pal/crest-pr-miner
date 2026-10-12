@@ -206,13 +206,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Create a reproducible sample.xlsx workbook with balanced human raters.",
         epilog=(
-            "Examples: python generate-sample.py 380 --raters 6; "
+            "Examples: python generate-sample.py --sample-size 380 --raters 6; "
             "python generate-sample.py --sample-size 100 --seed 42"
         ),
     )
-    parser.add_argument("sample_size_pos", nargs="?", type=positive_int, help="number of PRs to sample")
     parser.add_argument(
-        "--sample-size", dest="sample_size_option", type=positive_int, help="number of PRs to sample"
+        "--sample-size", type=positive_int, help="number of PRs to sample (default: calculated)"
     )
     parser.add_argument("--raters", "--num-raters", type=positive_int, default=6, help="number of human raters (default: 6)")
     parser.add_argument("--seed", default=DEFAULT_SEED, help=f"random seed (default: {DEFAULT_SEED})")
@@ -221,16 +220,13 @@ def main() -> int:
 
     if args.raters < 2:
         parser.error("--raters must be at least 2")
-    if args.sample_size_pos is not None and args.sample_size_option is not None:
-        parser.error("specify the sample size either positionally or with --sample-size, not both")
-    requested_size = args.sample_size_option or args.sample_size_pos
     if not args.data_dir.is_dir():
         parser.error(f"input data directory does not exist: {args.data_dir}")
 
     prs = find_pr_files(args.data_dir)
     if not prs:
         parser.error(f"no PR JSON files found under {args.data_dir}")
-    sample_size = requested_size if requested_size is not None else default_sample_size(len(prs))
+    sample_size = args.sample_size or default_sample_size(len(prs))
     if sample_size > len(prs):
         parser.error(
             f"sample size {sample_size} exceeds the {len(prs)} available PRs"
