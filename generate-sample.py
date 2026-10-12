@@ -200,7 +200,21 @@ def create_workbook(
         f"G2:G{summary.max_row}",
         FormulaRule(
             formula=['$F2="Agreement"'],
-            fill=PatternFill(fill_type="solid", fgColor="BFBFBF", bgColor="BFBFBF"),
+            fill=PatternFill(fill_type="solid", fgColor="BFBFBF", bgColor="C6EFCE"),
+        ),
+    )
+    summary.conditional_formatting.add(
+        f"G2:G{summary.max_row}",
+        FormulaRule(
+            formula=['$F2="Disagreement"'],
+            fill=PatternFill(fill_type="solid", fgColor="BFBFBF", bgColor="FFC7CE"),
+        ),
+    )
+    summary.conditional_formatting.add(
+        f"G2:G{summary.max_row}",
+        FormulaRule(
+            formula=['$F2="Pending"'],
+            fill=PatternFill(fill_type="solid", fgColor="BFBFBF", bgColor="FFEB9C"),
         ),
     )
     for column, width in {
