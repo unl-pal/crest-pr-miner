@@ -115,16 +115,25 @@ def create_workbook(
     workbook = Workbook()
     summary = workbook.active
     summary.title = "Summary"
-    summary.append(["Pull Request", "Rater 1", "Rater 2", "Agreement Status", "Judgment"])
+    summary.append(
+        [
+            "Pull Request",
+            "Rater 1",
+            "R1 Judgment",
+            "Rater 2",
+            "R2 Judgment",
+            "Agreement Status",
+            "Judgment",
+        ]
+    )
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
-    for sheet in [summary]:
-        for cell in sheet[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center")
-        sheet.freeze_panes = "A2"
+    for cell in summary[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    summary.freeze_panes = "A2"
 
     rater_sheets = []
     for index in range(raters):
@@ -167,35 +176,120 @@ def create_workbook(
         link.hyperlink = url
         link.style = "Hyperlink"
         first_rater, second_rater = assigned
-        summary.cell(
-            row=row,
-            column=2,
-            value=f'=IF(\'Rater {first_rater + 1}\'!B{rater_rows[first_rater][pr_file]}="","",'
-            f'\'Rater {first_rater + 1}\'!B{rater_rows[first_rater][pr_file]})',
-        )
+        summary.cell(row=row, column=2, value=f"Rater {first_rater + 1}")
         summary.cell(
             row=row,
             column=3,
+            value=f'=IF(\'Rater {first_rater + 1}\'!B{rater_rows[first_rater][pr_file]}="","",'
+            f'\'Rater {first_rater + 1}\'!B{rater_rows[first_rater][pr_file]})',
+        )
+        summary.cell(row=row, column=4, value=f"Rater {second_rater + 1}")
+        summary.cell(
+            row=row,
+            column=5,
             value=f'=IF(\'Rater {second_rater + 1}\'!B{rater_rows[second_rater][pr_file]}="","",'
             f'\'Rater {second_rater + 1}\'!B{rater_rows[second_rater][pr_file]})',
         )
         summary.cell(
             row=row,
-            column=4,
-            value=f'=IF(OR(B{row}="",C{row}=""),"Pending",IF(B{row}=C{row},"Agreement","Disagreement"))',
+            column=6,
+            value=f'=IF(OR(C{row}="",E{row}=""),"Pending",IF(C{row}=E{row},"Agreement","Disagreement"))',
         )
 
     summary.conditional_formatting.add(
-        f"E2:E{summary.max_row}",
+        f"G2:G{summary.max_row}",
         FormulaRule(
-            formula=['$D2="Agreement"'],
-            fill=PatternFill("solid", fgColor="D9D9D9"),
+            formula=['$F2="Agreement"'],
+            fill=PatternFill(fill_type="solid", fgColor="BFBFBF", bgColor="BFBFBF"),
         ),
     )
-    for column, width in {"A": 76, "B": 24, "C": 24, "D": 22, "E": 32}.items():
+    for column, width in {
+        "A": 76,
+        "B": 16,
+        "C": 24,
+        "D": 16,
+        "E": 24,
+        "F": 22,
+        "G": 32,
+    }.items():
         summary.column_dimensions[column].width = width
+
+    kappa = workbook.create_sheet("Fleiss' Kappa")
+    kappa["A1"] = "Fleiss' Kappa (completed PRs only)"
+    kappa["A2"] = "Overall Fleiss' Kappa"
+    kappa["A3"] = "Mean item agreement"
+    kappa["A4"] = "SecurityRelated proportion"
+    kappa["A5"] = "NotSecurityRelated proportion"
+    details_start = 8
+    details_end = details_start + len(sampled_prs) - 1
+    kappa["B2"] = (
+        f'=IF(OR(B3="",B4="",B5="",1-(B4^2+B5^2)=0),"",'
+        f'(B3-(B4^2+B5^2))/(1-(B4^2+B5^2)))'
+    )
+    kappa["B3"] = f'=IF(COUNT(D{details_start}:D{details_end})=0,"",AVERAGE(D{details_start}:D{details_end}))'
+    kappa["B4"] = (
+        f'=IF(COUNT(D{details_start}:D{details_end})=0,"",'
+        f'SUM(B{details_start}:B{details_end})/(2*COUNT(D{details_start}:D{details_end})))'
+    )
+    kappa["B5"] = (
+        f'=IF(COUNT(D{details_start}:D{details_end})=0,"",'
+        f'SUM(C{details_start}:C{details_end})/(2*COUNT(D{details_start}:D{details_end})))'
+    )
+    for column, heading in enumerate(
+        [
+            "Pull Request",
+            "SecurityRelated",
+            "NotSecurityRelated",
+            "Item Agreement",
+            "Agreement Status",
+        ],
+        start=1,
+    ):
+        kappa.cell(row=7, column=column, value=heading)
+    for cell in kappa[7]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    kappa.freeze_panes = "A8"
+    for index, pr_file in enumerate(sampled_prs, start=details_start):
+        summary_row = index - details_start + 2
+        url = pr_url(pr_file, data_dir)
+        link = kappa.cell(row=index, column=1, value=url)
+        link.hyperlink = url
+        link.style = "Hyperlink"
+        kappa.cell(
+            row=index,
+            column=2,
+            value=f'=IF(\'Summary\'!F{summary_row}="Pending","",'
+            f'COUNTIF(\'Summary\'!C{summary_row},"SecurityRelated")+'
+            f'COUNTIF(\'Summary\'!E{summary_row},"SecurityRelated"))',
+        )
+        kappa.cell(
+            row=index,
+            column=3,
+            value=f'=IF(\'Summary\'!F{summary_row}="Pending","",'
+            f'COUNTIF(\'Summary\'!C{summary_row},"NotSecurityRelated")+'
+            f'COUNTIF(\'Summary\'!E{summary_row},"NotSecurityRelated"))',
+        )
+        kappa.cell(
+            row=index,
+            column=4,
+            value=f'=IF(\'Summary\'!F{summary_row}="Pending","",'
+            f'((B{index}^2+C{index}^2)-2)/(2*(2-1)))',
+        )
+        kappa.cell(row=index, column=5, value=f"='Summary'!F{summary_row}")
+    kappa.column_dimensions["A"].width = 76
+    kappa.column_dimensions["B"].width = 24
+    kappa.column_dimensions["C"].width = 26
+    kappa.column_dimensions["D"].width = 20
+    kappa.column_dimensions["E"].width = 22
+    for cell in kappa[1]:
+        cell.font = Font(bold=True, size=14)
+    kappa.auto_filter.ref = f"A7:E{details_end}"
+
     for sheet in workbook.worksheets:
-        sheet.auto_filter.ref = sheet.dimensions
+        if sheet != kappa:
+            sheet.auto_filter.ref = sheet.dimensions
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     workbook.calculation.calcMode = "auto"
