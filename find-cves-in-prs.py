@@ -113,11 +113,17 @@ def download_cve(cve_id: str, cve_data_dir: Path, force: bool, skip_history: boo
     if skip_history:
         cmd.append("--skip-history")
 
-    _rate_limit()
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        logger.warning("%s: cve-downloader.py exited with code %d", cve_id, result.returncode)
-        return False
+    cve_dir = cve_data_dir / cve_id
+    metadata_path = cve_dir / f"{cve_id}.json"
+    history_path = cve_dir / "history.json"
+
+    if force or not metadata_path.exists() or not history_path.exists():
+        _rate_limit()
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            logger.warning("%s: cve-downloader.py exited with code %d", cve_id, result.returncode)
+            return False
+
     return True
 
 
