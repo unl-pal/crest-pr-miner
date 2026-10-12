@@ -41,6 +41,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -53,6 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("data")
+SKIPPED_DATA_ROOT = Path("skipped")
 CVE_DATA_ROOT = Path("cves")
 CWE_DATA_ROOT = Path("cwes")
 CWE_TYPES = ("weakness", "category", "view")
@@ -122,6 +124,24 @@ def cwes_in_cve_metadata(cve_id: str, cve_data_dir: Path) -> set[str]:
     return find_cwe_ids(metadata_path.read_text(encoding="utf-8", errors="ignore"))
 
 
+def move_pr(pr_dir: Path):
+    parts = [p for p in pr_dir.parts]
+    parts[0] = SKIPPED_DATA_ROOT
+    dst_dir = Path(*parts)
+
+    logger.info("MOVE: %s -> %s", pr_dir, dst_dir)
+    dst_dir.parent.mkdir(parents=True, exist_ok=True)
+    os.rename(pr_dir, dst_dir)
+
+    pr_dir = pr_dir.parent
+    if not sum(1 for item in pr_dir.iterdir()):
+        pr_dir.rmdir()
+
+        pr_dir = pr_dir.parent
+        if not sum(1 for item in pr_dir.iterdir()):
+            pr_dir.rmdir()
+
+
 def process_pr(pr_dir: Path, cve_data_dir: Path, cwe_data_dir: Path) -> int:
     """Write cwes.json for pr_dir. Returns the number of distinct valid CWEs found."""
     mentioned = cwes_in_pr_files(pr_dir)
@@ -137,12 +157,20 @@ def process_pr(pr_dir: Path, cve_data_dir: Path, cwe_data_dir: Path) -> int:
             continue
         cwes_out[cwe_id] = {"mentioned": cwe_id in mentioned, "via_cves": sorted(via_cves.get(cwe_id, ()))}
     (pr_dir / "cwes.json").write_text(json.dumps(cwes_out, indent=2), encoding="utf-8")
+
+    if not cwes_out:
+        logger.warning("No valid CWEs found for PR: %s", pr_dir)
+        move_pr(pr_dir)
+
     return len(cwes_out)
 
 
 def main(argv=None):
+    global SKIPPED_DATA_ROOT
+
     parser = argparse.ArgumentParser(description="Find CWE mentions in each mined PR and in the metadata of the CVEs it mentions.")
     parser.add_argument("--data-dir", type=Path, default=DATA_ROOT, help=f"Root directory of mined PR data (default: {DATA_ROOT}).")
+    parser.add_argument("--skipped-dir", type=Path, default=SKIPPED_DATA_ROOT, help=f"Root directory of skipped/filtered data (default: {SKIPPED_DATA_ROOT}).")
     parser.add_argument("--cve-data-dir", type=Path, default=CVE_DATA_ROOT, help=f"Root directory of downloaded CVE metadata, see cve-downloader.py (default: {CVE_DATA_ROOT}).")
     parser.add_argument("--cwe-data-dir", type=Path, default=CWE_DATA_ROOT, help=f"Root directory of downloaded CWE metadata, see cwe-miner.py (default: {CWE_DATA_ROOT}).")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
@@ -158,6 +186,8 @@ def main(argv=None):
     if not args.cwe_data_dir.exists():
         logger.error("CWE data directory %s does not exist, run cwe-miner.py first", args.cwe_data_dir)
         return 1
+
+    SKIPPED_DATA_ROOT = Path(args.skipped_dir)
 
     pr_dirs = list(find_pr_dirs(args.data_dir))
     logger.info("Found %d PR directories", len(pr_dirs))
