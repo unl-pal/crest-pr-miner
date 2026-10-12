@@ -318,8 +318,45 @@ def create_workbook(
         cell.font = Font(bold=True, size=14)
     kappa.auto_filter.ref = f"A7:E{details_end}"
 
+    alpha = workbook.create_sheet("Krippendorff's Alpha")
+    alpha["A1"] = "Krippendorff's Alpha (nominal, completed PRs only)"
+    alpha["A2"] = "Krippendorff's Alpha"
+    alpha["A3"] = "Completed PRs"
+    alpha["A4"] = "Observed disagreement"
+    alpha["A5"] = "Expected disagreement"
+    completed_count = f"COUNT('Fleiss'' Kappa'!D{details_start}:D{details_end})"
+    category_proportions = "('Fleiss'' Kappa'!B4^2+'Fleiss'' Kappa'!B5^2)"
+    alpha["B3"] = f"={completed_count}"
+    alpha["B4"] = f'=IF(B3=0,"",1-\'Fleiss\'\' Kappa\'!B3)'
+    alpha["B5"] = (
+        f'=IF(OR(B3=0,1-{category_proportions}=0),"",'
+        f'(2*B3)/(2*B3-1)*(1-{category_proportions}))'
+    )
+    alpha["B2"] = '=IF(OR(B3=0,B5="",B5=0),"",1-B4/B5)'
+    alpha.column_dimensions["A"].width = 52
+    alpha.column_dimensions["B"].width = 24
+    alpha["A1"].font = Font(bold=True, size=14)
+    alpha.freeze_panes = "A2"
+
+    ac1 = workbook.create_sheet("Gwet's AC1")
+    ac1["A1"] = "Gwet's AC1 (nominal, completed PRs only)"
+    ac1["A2"] = "Gwet's AC1"
+    ac1["A3"] = "Completed PRs"
+    ac1["A4"] = "Observed agreement"
+    ac1["A5"] = "SecurityRelated prevalence"
+    ac1["A6"] = "Expected agreement"
+    ac1["B3"] = f"={completed_count}"
+    ac1["B4"] = "='Fleiss'' Kappa'!B3"
+    ac1["B5"] = "='Fleiss'' Kappa'!B4"
+    ac1["B6"] = '=IF(B3=0,"",2*B5*(1-B5))'
+    ac1["B2"] = '=IF(B3=0,"",(B4-B6)/(1-B6))'
+    ac1.column_dimensions["A"].width = 42
+    ac1.column_dimensions["B"].width = 24
+    ac1["A1"].font = Font(bold=True, size=14)
+    ac1.freeze_panes = "A2"
+
     for sheet in workbook.worksheets:
-        if sheet != kappa:
+        if sheet == summary or sheet in [rater_sheet for rater_sheet, _ in rater_sheets]:
             sheet.auto_filter.ref = sheet.dimensions
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
