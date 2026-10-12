@@ -51,7 +51,7 @@ def move_pr(pr_dir: Path, args):
                 pr_dir.rmdir()
 
 
-def process_pr(pr_dir: Path, args) -> int:
+def process_pr(pr_dir: Path, args):
     """Tests if this PR needs to be filtered and moved to the skipped directory."""
     pr_num = pr_dir.name
     diff = pr_dir / (pr_num + ".diff")
@@ -59,7 +59,7 @@ def process_pr(pr_dir: Path, args) -> int:
     if not diff.exists():
         logger.warning("PR is missing diff: %s", pr_dir)
         move_pr(pr_dir, args)
-        return False
+        return "nodiff"
 
     with open(diff, 'r', encoding='utf-8', errors='ignore') as f:
         try:
@@ -76,13 +76,18 @@ def process_pr(pr_dir: Path, args) -> int:
         if l.split('.')[-1] in ['java', 'py', 'c', 'h', 'cpp', 'hpp', 'sql']:
             has_source = True
 
+    diff2 = [l for l in diff_data if '/test/' in l or '/tests/' in l]
+    if len(diff2) == len(diff_data):
+        logger.warning("PR diff contains only test files: %s", pr_dir)
+        move_pr(pr_dir, args)
+        return "test"
     if has_source:
         return None
 
     logger.warning("PR has no source files: %s", diff_data)
     move_pr(pr_dir, args)
 
-    return True
+    return "nosource"
 
 
 if __name__ == "__main__":
@@ -107,11 +112,14 @@ if __name__ == "__main__":
 
     bad = 0
     moved = 0
+    tests = 0
     for pr_dir in pr_dirs:
         res = process_pr(pr_dir, args)
-        if res == False:
+        if res == "nodiff":
             bad += 1
-        elif res == True:
+        elif res == "nosource":
             moved += 1
+        elif res == "test":
+            tests += 1
 
-    logger.info("Done. %d PRs processed. Missing diff: %s. Moved: %s.", len(pr_dirs), bad, moved)
+    logger.info("Done. %d PRs processed. Missing diff: %s. Filtered: %s. Only Tests: %s.", len(pr_dirs), bad, moved, tests)
