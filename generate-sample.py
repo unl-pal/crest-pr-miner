@@ -195,6 +195,11 @@ def create_workbook(
             column=6,
             value=f'=IF(OR(C{row}="",E{row}=""),"Pending",IF(C{row}=E{row},"Agreement","Disagreement"))',
         )
+        summary.cell(
+            row=row,
+            column=7,
+            value=f'=IF(C{row}=E{row},C{row},"")',
+        )
 
     summary.conditional_formatting.add(
         f"G2:G{summary.max_row}",
