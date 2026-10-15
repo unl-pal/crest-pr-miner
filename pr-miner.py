@@ -81,10 +81,16 @@ class TokenPool:
             {
                 "token": t,
                 "client": Github(auth=Auth.Token(t), per_page=100, user_agent="CREST-PR-Miner/1.0.0 (https://github.com/unl-pal/crest-pr-miner)"),
+                "remaining": {},
                 "reset_at": {},
             }
             for t in tokens
         ]
+        logger.debug("[pool] finding rate limits for all tokens...")
+        for i in range(len(self._pool)):
+            client = self._pool[i]["client"]
+            self.update_rate_limit(client, "core")
+            self.update_rate_limit(client, "search")
         self._current = 0
 
     def get(self, category: str = "core") -> Github:
@@ -101,8 +107,9 @@ class TokenPool:
         for i in range(n):
             entry = self._pool[(self._current + i) % n]
             ra = entry["reset_at"].get(category)
-            if ra is None or ra <= now:
-                logger.info("[pool] using token %s with reset %s", entry["token"], ra)
+            remaining = entry["remaining"].get(category)
+            if remaining > 0 or (remaining is None and (ra is None or ra <= now)):
+                logger.info("[pool] using token %s with remaining %s, reset %s", entry["token"], remaining, ra)
                 self._current = (self._current + i + 1) % n
                 return entry["client"]
 
@@ -110,7 +117,7 @@ class TokenPool:
         best = min(self._pool, key=lambda e: e["reset_at"].get(category, now))
         wait = (best["reset_at"][category] - now).total_seconds() + 5
         logger.warning(
-            "All tokens rate-limited for '%s'; sleeping %.0f seconds until %s",
+            "[pool] All tokens rate-limited for '%s'; sleeping %.0f seconds until %s",
             category,
             wait,
             best["reset_at"][category].isoformat(),
@@ -129,14 +136,24 @@ class TokenPool:
     def _fetch_reset(self, client: Github, category: str) -> datetime | None:
         """Fetch the rate-limit reset time for *category* from the API."""
         try:
-            rl = client.get_rate_limit()
-            logger.debug("rate limit data: " + json.dumps(rl))
+            rl = client.get_rate_limit().resources
             resource = getattr(rl, category, None)
             if resource is not None:
                 reset_ts = resource.reset
                 return reset_ts.replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
+        return None
+
+    def _fetch_remaining(self, client: Github, category: str) -> datetime | None:
+        """Fetch the rate-limit remaining count for *category* from the API."""
+        try:
+            rl = client.get_rate_limit().resources
+            resource = getattr(rl, category, None)
+            if resource is not None:
+                return resource.remaining
+        except Exception as e:
+            print(e)
         return None
 
     def update_rate_limit(self, client: Github, category: str = "core"):
@@ -144,9 +161,12 @@ class TokenPool:
         for entry in self._pool:
             if entry["client"] is client:
                 ts = self._fetch_reset(client, category)
-                logger.debug("[pool] token %s category %s resets %s", entry["token"], category, ts)
                 if ts is not None:
                     entry["reset_at"][category] = ts
+                remaining = self._fetch_remaining(client, category)
+                if remaining is not None:
+                    entry["remaining"][category] = remaining
+                logger.debug("[pool] token %s category %s resets %s remaining %s", entry["token"], category, ts, remaining)
                 break
 
     def mark_rate_limited(self, client: Github, category: str = "core"):
@@ -157,7 +177,11 @@ class TokenPool:
                 if ts is None:
                     ts = datetime.now(tz=timezone.utc) + timedelta(hours=1)
                 entry["reset_at"][category] = ts
-                logger.info("Token rate-limited (%s); reset at %s", category, ts)
+                remaining = self._fetch_remaining(client, category)
+                if remaining is None:
+                    remaining = 0
+                entry["remaining"][category] = remaining
+                logger.info("[pool] Token rate-limited (%s); reset at %s", category, ts)
                 break
 
 
