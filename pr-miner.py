@@ -461,7 +461,6 @@ def backfill_diffs(pool: TokenPool, args):
         if diff_path.exists():
             continue
         logger.info("Backfilling diff for %s PR #%s", repo_full_name, pr_number)
-        continue
         json_path = pr_dir / f"{pr_number}.json"
         try:
             pr_data = json.loads(json_path.read_text(encoding="utf-8"))
