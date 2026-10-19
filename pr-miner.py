@@ -299,7 +299,7 @@ def download_diff(pool: TokenPool, diff_url, diff_path: Path):
                 return
 
 
-def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
+def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path, diffs):
     """Download PR JSON and diff into pr_dir."""
     pr_dir.mkdir(parents=True, exist_ok=True)
     pr_id = pr.number
@@ -311,7 +311,7 @@ def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path):
         json_path.write_text(json.dumps(pr.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved %s", json_path)
 
-    if not diff_path.exists():
+    if diffs and not diff_path.exists():
         download_diff(pool, pr.diff_url, diff_path)
 
 
@@ -615,7 +615,7 @@ def _scrape_search_page(pool: TokenPool, args, query: str, seen: set) -> tuple[i
                 skip_pr(pr, skip_pr_dir)
                 continue
 
-            download_pr(pool, repo_full_name, pr, pr_dir)
+            download_pr(pool, repo_full_name, pr, pr_dir, args.diffs)
         else:
             logger.debug("PR %s#%s already downloaded or skipped, skipping", repo_full_name, pr_number)
             try:
@@ -839,7 +839,7 @@ def scrape_repos(pool: TokenPool, repos: list[str], args):
                     logger.debug("PR %s#%s failed to pass filters, skipping", repo_full_name, pr.number)
                     skip_pr(pr, skip_pr_dir)
                     continue
-                download_pr(pool, repo_full_name, pr, pr_dir)
+                download_pr(pool, repo_full_name, pr, pr_dir, args.diffs)
             else:
                 logger.debug("PR %s#%s already downloaded, skipping", repo_full_name, pr.number)
 
