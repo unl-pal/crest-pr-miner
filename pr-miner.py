@@ -57,6 +57,7 @@ DEFAULT_LANGUAGES = {"Java", "C", "C++", "Python"}
 DEFAULT_MIN_PARTICIPANTS = 2
 DEFAULT_KEYWORDS = ["CWE-", "CVE-"]
 DEFAULT_OPENED_BEFORE = datetime(2026, 8, 12, tzinfo=timezone.utc)
+DEFAULT_OPENED_AFTER = datetime(1980, 1, 1, tzinfo=timezone.utc)
 DATA_ROOT = Path("data")
 SKIPPED_DATA_ROOT = Path("skipped")
 
@@ -710,11 +711,17 @@ def scrape_via_search(pool: TokenPool, args):
         if lang is not None:
             base_parts.append(f"language:{lang}")
 
-        # Apply the opened_before ceiling to the probe query so we discover the
-        # window only within the requested date range.
         probe_parts = list(base_parts)
-        if args.opened_before:
-            probe_parts.append(f"created:<={args.opened_before.strftime('%Y-%m-%d')}")
+
+        # Apply the opened_before/opened_after to the probe query so we discover the
+        # window only within the requested date range.
+        if args.opened_before and args.opened_after:
+            probe_parts.append(f"created:{args.opened_after.strftime('%Y-%m-%d')}..{args.opened_before.strftime('%Y-%m-%d')}")
+        else:
+            if args.opened_after:
+                probe_parts.append(f"created:>{args.opened_after.strftime('%Y-%m-%d')}")
+            if args.opened_before:
+                probe_parts.append(f"created:<={args.opened_before.strftime('%Y-%m-%d')}")
         probe_query = " ".join(probe_parts)
 
         logger.info("Determining time window for query: %s", probe_query)
@@ -724,16 +731,11 @@ def scrape_via_search(pool: TokenPool, args):
             logger.warning("Could not determine time window for language=%s; skipping.", lang)
             continue
 
-        logger.info(
-            "Time window for language=%s: %s .. %s",
-            lang,
-            earliest_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            latest_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        )
-
         # Format helpers
         def _fmt(dt: datetime) -> str:
             return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        logger.info("Time window for language=%s: %s .. %s", lang, _fmt(earliest_ts), _fmt(latest_ts))
 
         # --- Paginated search loop ---
         # Each iteration issues one search query covering earliest_ts..window_end.
@@ -912,6 +914,13 @@ def parse_args(argv=None):
         help="Only include PRs opened before this date (default: %(default)s).",
     )
     filter_group.add_argument(
+        "--opened-after",
+        default=DEFAULT_OPENED_AFTER.isoformat(),
+        dest="opened_after_str",
+        metavar="ISO_DATE",
+        help="Only include PRs opened after this date (default: %(default)s).",
+    )
+    filter_group.add_argument(
         "--resume",
         action="store_true",
         help="Resume mining using the oldest date of existing PRs.",
@@ -981,6 +990,15 @@ def parse_args(argv=None):
     if args.resume:
         args.opened_before_str = _find_oldest_pr(args)
         logger.info("Resumed search starting at %s", args.opened_before_str)
+
+    # Parse opened_after
+    try:
+        dt = datetime.fromisoformat(args.opened_after_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        args.opened_after = dt
+    except ValueError as exc:
+        parser.error(f"Invalid --opened-after date: {exc}")
 
     # Parse opened_before
     try:
