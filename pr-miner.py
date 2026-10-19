@@ -323,6 +323,7 @@ def download_reviews(pool: TokenPool, pr, reviews_dir: Path):
     for review in reviews:
         review_path = reviews_dir / f"{review.id}.json"
         if review_path.exists():
+            logger.info("Reviews %s already exists, skipping", review_path)
             continue
         review_path.write_text(json.dumps(review.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved %s", review_path)
@@ -332,6 +333,7 @@ def download_review_comments(pool: TokenPool, pr, reviews_dir: Path):
     """Download all review comments for a PR into a single comments.json file."""
     comments_path = reviews_dir / "comments.json"
     if comments_path.exists():
+        logger.info("Comments %s already exists, skipping", comments_path)
         return
     reviews_dir.mkdir(parents=True, exist_ok=True)
     comments = _call_with_retry(pool, lambda client: list(pr.get_review_comments()))
@@ -347,6 +349,7 @@ def download_comments(pool: TokenPool, pr, pr_dir: Path):
     """Download all comments for a PR into a single comments.json file."""
     comments_path = pr_dir / "comments.json"
     if comments_path.exists():
+        logger.info("Comments %s already exists, skipping", comments_path)
         return
     pr_dir.mkdir(parents=True, exist_ok=True)
     comments = _call_with_retry(pool, lambda client: list(pr.get_issue_comments()))
@@ -362,6 +365,7 @@ def download_timeline(pool: TokenPool, repo_full_name: str, pr_number: int, pr_d
     """Download the issue timeline for a PR into timeline.json."""
     timeline_path = pr_dir / "timeline.json"
     if timeline_path.exists():
+        logger.info("Timeline %s already exists, skipping", timeline_path)
         return
     pr_dir.mkdir(parents=True, exist_ok=True)
 
@@ -427,6 +431,8 @@ def download_commits(pool: TokenPool, pr, pr_dir: Path):
                 encoding="utf-8",
             )
             logger.info("Saved %s", json_path)
+        else:
+            logger.info("Commit %s already exists, skipping", json_path)
 
         if not diff_path.exists():
             diff_url = f"https://github.com/{pr.base.repo.full_name}/commit/{sha}.diff"
@@ -441,6 +447,8 @@ def download_commits(pool: TokenPool, pr, pr_dir: Path):
                 logger.info("Saved %s", diff_path)
             except Exception as exc:
                 logger.warning("Could not download diff for commit %s: %s", sha, exc)
+        else:
+            logger.info("Commit diff %s already exists, skipping", diff_path)
 
 
 # ---------------------------------------------------------------------------
@@ -652,8 +660,10 @@ def _get_time_window(pool: TokenPool, base_query: str) -> tuple[datetime | None,
     latest_issue = None
     earliest_issue = None
     try:
-        latest_issue = _call_with_retry(pool, _search_one, base_query, "desc", category="search")
         earliest_issue = _call_with_retry(pool, _search_one, base_query, "asc", category="search")
+        logger.debug("[time window] earliest: %s", earliest_issue.created_at)
+        latest_issue = _call_with_retry(pool, _search_one, base_query, "desc", category="search")
+        logger.debug("[time window] latest: %s", latest_issue.created_at)
     except GithubException as exc:
         logger.error("Could not determine time window: %s", exc)
 
