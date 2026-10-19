@@ -279,6 +279,10 @@ def skip_pr(pr, pr_dir: Path):
 
 
 def download_diff(pool: TokenPool, diff_url, diff_path: Path):
+    if diff_path.exists():
+        logger.info("Skipped existing diff %s", json_path)
+        return
+
     while True:
         client = pool.get()
         try:
@@ -289,7 +293,7 @@ def download_diff(pool: TokenPool, diff_url, diff_path: Path):
                 req.add_header("Authorization", f"token {token}")
             with urllib.request.urlopen(req, timeout=30) as resp:
                 diff_path.write_bytes(resp.read())
-            logger.info("Saved %s", diff_path)
+            logger.info("Saved diff %s", diff_path)
             pool.update_rate_limit(client)
             return
         except Exception as exc:
@@ -311,6 +315,8 @@ def download_pr(pool: TokenPool, repo_full_name: str, pr, pr_dir: Path, diffs):
     if not json_path.exists():
         json_path.write_text(json.dumps(pr.raw_data, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Saved %s", json_path)
+    else:
+        logger.info("Skipped existing %s", json_path)
 
     if diffs and not diff_path.exists():
         download_diff(pool, pr.diff_url, diff_path)
