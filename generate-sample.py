@@ -109,6 +109,13 @@ def pr_url(pr_file: Path, data_dir: Path) -> str:
     )
 
 
+def make_link(cell, url=None):
+    if url:
+        cell.hyperlink = url
+    cell.style = "Hyperlink"
+    return cell
+
+
 def create_workbook(
     sampled_prs: list[Path], assignments: list[tuple[int, int]], raters: int, data_dir: Path
 ) -> None:
@@ -118,9 +125,9 @@ def create_workbook(
     summary.append(
         [
             "Pull Request",
-            "Rater 1",
+            "First Rater",
             "R1 Judgment",
-            "Rater 2",
+            "Second Rater",
             "R2 Judgment",
             "Agreement Status",
             "Judgment",
@@ -164,9 +171,7 @@ def create_workbook(
         for rater in assigned:
             sheet, validation = rater_sheets[rater]
             row = sheet.max_row + 1
-            cell = sheet.cell(row=row, column=1, value=url)
-            cell.hyperlink = url
-            cell.style = "Hyperlink"
+            make_link(sheet.cell(row=row, column=1, value=url), url)
             validation.add(sheet.cell(row=row, column=2))
             rater_rows[rater][pr_file] = row
 
@@ -183,18 +188,16 @@ def create_workbook(
 
     for row, (pr_file, assigned) in enumerate(zip(sampled_prs, assignments), start=2):
         url = pr_url(pr_file, data_dir)
-        link = summary.cell(row=row, column=1, value=url)
-        link.hyperlink = url
-        link.style = "Hyperlink"
+        make_link(summary.cell(row=row, column=1, value=url), url)
         first_rater, second_rater = assigned
-        summary.cell(row=row, column=2, value=f"Rater {first_rater + 1}")
+        make_link(summary.cell(row=row, column=2, value=f"=HYPERLINK(\"#'Rater {first_rater + 1}'!B{rater_rows[first_rater][pr_file]}\", \"Rater {first_rater + 1}\")"))
         summary.cell(
             row=row,
             column=3,
             value=f'=IF(\'Rater {first_rater + 1}\'!B{rater_rows[first_rater][pr_file]}="","",'
             f'\'Rater {first_rater + 1}\'!B{rater_rows[first_rater][pr_file]})',
         )
-        summary.cell(row=row, column=4, value=f"Rater {second_rater + 1}")
+        make_link(summary.cell(row=row, column=4, value=f"=HYPERLINK(\"#'Rater {second_rater + 1}'!B{rater_rows[second_rater][pr_file]}\", \"Rater {second_rater + 1}\")"))
         summary.cell(
             row=row,
             column=5,
@@ -285,9 +288,7 @@ def create_workbook(
     for index, pr_file in enumerate(sampled_prs, start=details_start):
         summary_row = index - details_start + 2
         url = pr_url(pr_file, data_dir)
-        link = kappa.cell(row=index, column=1, value=url)
-        link.hyperlink = url
-        link.style = "Hyperlink"
+        make_link(kappa.cell(row=index, column=1, value=url), url)
         kappa.cell(
             row=index,
             column=2,
