@@ -1,0 +1,39 @@
+{
+    "name": "output_schema",
+    "strict": true,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "classification": {
+                "type": "string",
+                "enum": ["security", "not_security", "uncertain"]
+            },
+            "reject_reason": {
+                "type": "string",
+                "enum": ["not_security", "dependency_update", "upstream", "insufficient_evidence", ""]
+            },
+            "evidence": {
+                "type": "string"
+            },
+            "evidence_source": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["pr_title", "pr_description", "pr_comment", "review_comment", "commit_message", "code_diff", "label"]
+                }
+            },
+            "evidence_quote": {
+                "type": "array",
+                "items": {
+                    "type": "string"
+                }
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"]
+            }
+        },
+        "required": ["classification", "reject_reason", "evidence", "evidence_source", "evidence_quote", "confidence"],
+        "additionalProperties": false
+    }
+}
