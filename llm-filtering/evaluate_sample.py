@@ -38,6 +38,7 @@ def read_judgments(path: Path) -> dict[str, str]:
 def evaluate_model(model_dir: Path, judgments: dict[str, str], name: str) -> None:
     human_labels = []
     model_labels = []
+    mismatches = []
     for pr, judgment in judgments.items():
         response_path = model_dir / (pr.replace("/", "_") + "_response.json")
         if not response_path.is_file():
@@ -51,13 +52,19 @@ def evaluate_model(model_dir: Path, judgments: dict[str, str], name: str) -> Non
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ValueError(f"{response_path}: invalid response: {exc}") from exc
         human_labels.append(judgment)
-        model_labels.append(
-            "SecurityRelated" if classification == "security" else "NotSecurityRelated"
-        )
+        model_judgment = "SecurityRelated" if classification == "security" else "NotSecurityRelated"
+        model_labels.append(model_judgment)
+        if judgment != model_judgment:
+            mismatches.append((pr, judgment, model_judgment, response_path))
 
     print(f"Model: {name}")
     print(f"Matched {len(human_labels)}/{len(judgments)} PRs; "
           f"missing {len(judgments) - len(human_labels)} responses.")
+    print(f"Mismatched judgments: {len(mismatches)}")
+    for pr, human_judgment, model_judgment, response_path in mismatches:
+        print(f"  PR: {pr}")
+        print(f"    Human: {human_judgment}; Model: {model_judgment}")
+        print(f"    Response file: {response_path}")
     if human_labels:
         print(classification_report(
             human_labels, model_labels, labels=LABELS, zero_division=0,
