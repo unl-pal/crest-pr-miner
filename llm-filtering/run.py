@@ -219,4 +219,3 @@ if __name__ == "__main__":
             finally:
                 if hasattr(signal, "SIGALRM"):
                     signal.alarm(0)
-        break
