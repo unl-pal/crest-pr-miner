@@ -14,7 +14,7 @@ def get_model(llm: str, use_cheapest: bool) -> str:
     if llm == "openai":
         return "gpt-6-luna" if use_cheapest else "gpt-6.1-terra"
     elif llm == "gemini":
-        return "gemini-3.5-flash-lite" if use_cheapest else "gemini-3.6-flash"
+        return "gemini-3.1-flash-lite" if use_cheapest else "gemini-3.8-flash"
     elif llm == "ollama":
         raise ValueError(f"For Ollama, you must specify the model via the --model argument")
     else:
