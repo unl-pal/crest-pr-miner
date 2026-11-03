@@ -150,9 +150,10 @@ activemq-data/
 *.sage.py
 
 # Downloaded PR data
-data/*
-skipped/*
+data/
+skipped/
 !data/.gitkeep
+llm-filtering/responses/
 
 # Downloaded CWE catalog data
 cwes/*

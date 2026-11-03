@@ -10,7 +10,7 @@
             },
             "reject_reason": {
                 "type": "string",
-                "enum": ["not_security", "dependency_update", "upstream", "insufficient_evidence", ""]
+                "enum": ["not_security", "dependency_update", "upstream", "insufficient_evidence", " "]
             },
             "evidence": {
                 "type": "string"

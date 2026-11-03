@@ -221,20 +221,30 @@ Return exactly one JSON object conforming to this schema:
 
 ## **PR Metadata**
 
+```json
 <<pr-metadata.json>>
+```
 
 ## **PR Discussion Comments**
 
+```json
 <<pr-comments.json>>
+```
 
 ## **PR Review Comments**
 
+```json
 <<pr-review-comments.json>>
+```
 
 ## **PR Commit Messages**
 
+```json
 <<pr-commits.json>>
+```
 
 ## **PR Code Diff**
 
-<<pr-diff.json>>
+```diff
+<<pr.diff>>
+```
