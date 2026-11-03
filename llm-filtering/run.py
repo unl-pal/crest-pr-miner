@@ -173,6 +173,7 @@ def process_input_file(file_path: str, args: argparse.Namespace) -> None:
         data = add_metadata(response, args.llm, model_name, model_params, file_path)
         save_response(output_path, data)
 
+        backoff = 60
         time.sleep(args.sleep / 1000.0)
     except TimeoutException as e:
         raise e
