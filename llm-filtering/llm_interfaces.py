@@ -152,8 +152,28 @@ def run_openai(prompt: str, model_name: str, thinking: bool=False, **kwargs: Any
 
     response = client.responses.create(
         model=model_name,
-        instructions=system_prompt,
-        input=user_data,
+		prompt_cache_options={
+			"mode": "explicit",
+			"ttl": "30m"
+		},
+		input=[
+			{
+				"role": "developer",
+				"content": [
+					{
+						"type": "input_text",
+						"text": system_prompt,
+						"prompt_cache_breakpoint": {
+							"mode": "explicit"
+						}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": user_data
+			}
+		],
         prompt_cache_key="pr-filtering-system-prompt",
 		**args,
     )
