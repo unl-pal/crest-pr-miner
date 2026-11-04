@@ -17,21 +17,22 @@ def security_prs(responses_dir: Path) -> set[Path]:
         raise ValueError(f"No response files found in {responses_dir}")
     selected = set()
     for path in response_files:
-        try:
-            saved = json.loads(path.read_text(encoding="utf-8"))
-            if not saved['response'].startswith('{'):
-                saved['response'] = saved['response'][saved['response'].find('{'):]
-            response = json.loads(saved["response"])
-            classification = response["classification"]
-            if classification != "security":
-                continue
-            parts = saved["PR"].split("/")
-            if (len(parts) != 3 or any(part in {"", ".", ".."} for part in parts)
-                    or not parts[2].isdigit()):
-                raise ValueError("expected PR as owner/project/number")
-            selected.add(Path(*parts))
-        except (ValueError, KeyError, TypeError, AttributeError) as exc:
-            print(f"{path}: invalid response: {exc}")
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if '"classification":"security"' not in saved["response"]:
+            if '"classification":"not_security"' not in saved["response"]:
+                if '"classification":"uncertain"' not in saved["response"]:
+                    try:
+                        response = json.loads(saved["response"])
+                        classification = response["classification"]
+                        print('failed:', classification, path)
+                    except:
+                        print('bad json', path)
+            continue
+        parts = saved["PR"].split("/")
+        if (len(parts) != 3 or any(part in {"", ".", ".."} for part in parts)
+                or not parts[2].isdigit()):
+            raise ValueError("expected PR as owner/project/number")
+        selected.add(Path(*parts))
     return selected
 
 
