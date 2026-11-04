@@ -24,7 +24,7 @@ def pr_reference(value: str) -> str:
 def read_json(path: Path):
     """Load JSON, retaining the filename in any parse error."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
 
@@ -78,9 +78,9 @@ def build_prompt(reference: str, data_dir: Path = DATA_DIR) -> str:
             "comments": cleaned_json(optional_json(reviews_dir / "comments.json")),
         }, ensure_ascii=False, indent=2),
         "pr-commits.json": json.dumps(commits if (pr_dir / "commits").is_dir() else None, ensure_ascii=False, indent=2),
-        "pr.diff": diff_path.read_text(encoding="utf-8") if diff_path.exists() else None,
+        "pr.diff": diff_path.read_text(encoding="utf-8", errors="replace") if diff_path.exists() else None,
     }
-    template = (SCRIPT_DIR / "prompt-template.md").read_text(encoding="utf-8")
+    template = (SCRIPT_DIR / "prompt-template.md").read_text(encoding="utf-8", errors="replace")
     # Substitute once so placeholder-like text within PR content stays intact.
     return re.sub(
         r"<<([^<>]+)>>",
