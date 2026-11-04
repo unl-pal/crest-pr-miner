@@ -19,7 +19,7 @@
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "enum": ["pr_title", "pr_description", "pr_comment", "review_comment", "commit_message", "code_diff", "label"]
+                    "enum": ["pr_title", "pr_description", "pr_comment", "review_comment", "commit_message", "changed_files", "label"]
                 }
             },
             "evidence_quote": {

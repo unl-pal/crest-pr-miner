@@ -81,11 +81,14 @@ def find_files(directory: str) -> List[str]:
 
 
 def get_output_path(output_dir: str, input_path: str, llm: str, model_name: str) -> str:
+    parts = input_path.split('/')
+
     output_dir = os.path.join(output_dir, llm)
     output_dir = os.path.join(output_dir, model_name)
+    output_dir = os.path.join(output_dir, parts[0])
     os.makedirs(output_dir, exist_ok=True)
 
-    output_filename: str = '_'.join(input_path.split('/')) + '_response.json'
+    output_filename: str = '_'.join(parts) + '_response.json'
 
     return os.path.join(output_dir, output_filename)
 
@@ -157,15 +160,10 @@ def process_input_file(file_path: str, args: argparse.Namespace) -> None:
                 schema = json.load(file)
 
         if args.llm == 'openai':
-            model_params['reasoning_effort'] = 'medium'
-            model_params['max_completion_tokens'] = 16 * 1024
             response = run_openai(prompt, model_name, args.thinking, format=schema, **model_params)
         elif args.llm == 'gemini':
-            model_params['temperature'] = 0.2
-            model_params['max_output_tokens'] = 16 * 1024
             response = run_gemini(prompt, model_name, args.thinking, format=schema, **model_params)
         elif args.llm == 'ollama':
-            model_params['temperature'] = 0.2
             response = run_ollama(prompt, model_name, args.thinking, format=schema, **model_params)
         else:
             raise ValueError(f"Unknown LLM: {args.llm}")

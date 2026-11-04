@@ -120,30 +120,45 @@ def run_openai(prompt: str, model_name: str, thinking: bool=False, **kwargs: Any
     client: openai.OpenAI = openai.OpenAI()
 
     args = {
-        'reasoning_effort': 'medium',
-        'max_completion_tokens': 16 * 1024,
+        'reasoning': {"effort": "none"},
+        'temperature': 0.2,
+        'max_output_tokens': 2 * 1024,
         **kwargs,
     }
     if 'format' in args:
         if len(args['format']):
-            args['response_format']={
-                "type": "json_schema",
-                "json_schema": args['format'],
+            args['text'] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": args["format"]["name"],
+                    "strict": args["format"]["strict"],
+                    "schema": args["format"]["schema"],
+                }
             }
         del args['format']
 
-    response = client.chat.completions.create(
+    # Split prompt into system instructions and user data
+    # The template ends with "# 6. PR Data" - everything before is system prompt
+    # everything after (starting with "## PR Metadata") is user data
+    splitPoint = "# **6. PR Data**"
+    if splitPoint in prompt:
+        system_prompt, user_data = prompt.split(splitPoint, 1)
+        system_prompt = system_prompt.strip()
+        user_data = splitPoint + user_data
+    else:
+        # Fallback if the split marker isn't found
+        system_prompt = prompt
+        user_data = ""
+
+    response = client.responses.create(
         model=model_name,
-        messages=[
-            {
-                "role": "user",
-                "content": str(prompt)
-            }
-        ],
-        **args,
+        instructions=system_prompt,
+        input=user_data,
+        prompt_cache_key="pr-filtering-system-prompt",
+		**args,
     )
 
-    return response.choices[0].message.content or ""
+    return response.output_text
 
 
 # needed because Gemini does not allow "name"/"title" in JSON schemas

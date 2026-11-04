@@ -9,7 +9,7 @@ You will receive information about one GitHub pull request, potentially includin
 - Commit messages
 - General discussion comments
 - Code review comments (including inline comments)
-- Code diff (if available)
+- List of changed files (if available, file paths only, not the actual diff content)
 
 Your task is to determine whether the pull request discusses security.
 
@@ -100,7 +100,7 @@ However, include PRs that fix security vulnerabilities in the security tool itse
 
 Follow these steps in order:
 
-1. Examine the PR title, description, comments, review comments, commit messages, and available code diff.
+1. Examine the PR title, description, comments, review comments, commit messages, and list of changed files.
 2. Determine whether the PR exclusively falls into one of the exclusion categories in Section 2.
 3. If the PR exclusively falls into an exclusion category, classify it as NOT discussing security.
 
@@ -170,7 +170,7 @@ Allowed values:
 - "pr_comment": General PR discussion comments.
 - "review_comment": Code review comments, including inline review comments.
 - "commit_message": Commit messages.
-- "code_diff": PR code changes.
+- "changed_files": List of changed files.
 - "label": PR labels.
 
 Include only sources that actually support the classification.
@@ -191,7 +191,7 @@ Requirements:
 - Do not paraphrase or fabricate quotations.
 - Prefer the shortest quotation that clearly demonstrates the relevant evidence.
 - Include the original wording, preserving its meaning.
-- For code diffs, quote the relevant code or comment.
+- For changed files, quote the relevant file path.
 - For negative classifications, quote evidence supporting the exclusion when available.
 - For uncertain classifications, return an empty array if there is no meaningful quotation.
 
@@ -213,9 +213,7 @@ Confidence reflects certainty in the classification, not the severity of the sec
 
 # **5. Output Schema**
 
-Return exactly one JSON object conforming to this schema:
-
-<<filter-schema.json>>
+Return exactly one JSON object conforming to the schema provided in the API response format:
 
 # **6. PR Data**
 
@@ -245,6 +243,8 @@ Return exactly one JSON object conforming to this schema:
 
 ## **PR Code Diff**
 
-```diff
+List of changed files:
+
+```
 <<pr.diff>>
 ```

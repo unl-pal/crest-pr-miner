@@ -40,7 +40,8 @@ def evaluate_model(model_dir: Path, judgments: dict[str, str], name: str) -> Non
     model_labels = []
     mismatches = []
     for pr, judgment in judgments.items():
-        response_path = model_dir / (pr.replace("/", "_") + "_response.json")
+        parts = pr.split("/")
+        response_path = model_dir / parts[0] / (pr.replace("/", "_") + "_response.json")
         if not response_path.is_file():
             continue
         try:
