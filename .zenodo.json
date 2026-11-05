@@ -1,0 +1,53 @@
+{
+    "title": "CREST: A Dataset of GitHub Pull Requests Security Discussions",
+    "description": "Dataset and scripts to reproduce the results of the paper. See the README.md for more details.",
+    "keywords": [
+        "dataset",
+        "security",
+        "pull requests"
+    ],
+    "communities": [
+        {
+            "identifier": "zenodo"
+        }
+    ],
+    "upload_type": "dataset",
+    "language": "eng",
+    "creators": [
+        {
+            "affiliation": "University of Nebraska-Lincoln",
+            "name": "Idriss Abdelmadjid"
+        },
+        {
+            "affiliation": "University of Nebraska at Omaha",
+            "name": "Anup Gautam"
+        },
+        {
+            "affiliation": "University of Nebraska-Lincoln",
+            "name": "Benjamin Grelk"
+        },
+        {
+            "affiliation": "University of Nebraska at Omaha",
+            "name": "Jaydeb Sarker"
+        },
+        {
+            "affiliation": "University of Nebraska at Omaha",
+            "name": "Kshitiz Aryal"
+        },
+        {
+            "affiliation": "University of Nebraska at Omaha",
+            "name": "Harvey Siy"
+        },
+        {
+            "affiliation": "University of Nebraska-Lincoln",
+            "name": "Robert Dyer"
+        }
+    ],
+    "access_right": "open",
+    "license": "apache-2.0",
+    "version": "1.0.0",
+    "prereserve_doi": {
+        "doi": "10.5281/zenodo.23670655",
+        "recid": 23670655
+    }
+}
