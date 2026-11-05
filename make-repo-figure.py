@@ -330,6 +330,18 @@ def main():
         n = sum(flows[g, o] for g in GROUPS)
         print(f"  {o:19} {n:9,} PRs ({n / total:.0%})")
 
+    print(f"""
+Of the \\minedPRs PRs,
+\\textbf{{{prs["C"]:,}}} come from C repositories,
+\\textbf{{{prs["C++"]:,}}} from C++,
+\\textbf{{{prs["Java"]:,}}} from Java, and
+\\textbf{{{prs["Python"]:,}}} from Python;
+the remaining \\textbf{{{prs["Other"]:,}}} come from repositories that GitHub now lists under another language or none.
+\\textbf{{{sum(flows[g, "Merged"] for g in GROUPS):,}}} (\\textbf{{{sum(flows[g, "Merged"] for g in GROUPS) / total * 100:.0f}\\%}}) were merged,
+\\textbf{{{sum(flows[g, "Closed, not merged"] for g in GROUPS):,}}} (\\textbf{{{sum(flows[g, "Closed, not merged"] for g in GROUPS) / total * 100:.0f}\\%}}) were closed without merging, and
+\\textbf{{{sum(flows[g, "Open"] for g in GROUPS):,}}} (\\textbf{{{sum(flows[g, "Open"] for g in GROUPS) / total * 100:.0f}\\%}}) were still open when we collected them (Figure~\\ref{{fig:language_outcome}}).
+""")
+
 
 if __name__ == "__main__":
     main()
