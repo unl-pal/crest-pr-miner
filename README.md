@@ -246,3 +246,78 @@ options:
 ```
 
 Reruns are safe: each PR's `cwes.json` is regenerated from scratch.
+
+# Most Frequent CWEs
+
+Ranks CWEs by the number of mined PRs that list them. Dependabot PRs and PRs
+with no valid CWE aren't counted.
+
+Requires, in order:
+- `cwe-miner.py` to have downloaded the CWE catalog into `cwes/`, which provides
+  the CWE names
+- `find-cwes-in-prs.py` to have written each PR's `cwes.json`
+
+Usage:
+```sh
+    python top-cwes.py [options]
+```
+
+Output goes to the terminal, and no files are written:
+- The number of PRs counted and the number of distinct CWEs
+- A table of the top CWEs, with each one's PR count, share of PRs, and how many
+  PRs mention it directly or link to it through a CVE
+- A sentence naming the top CWEs, for use in the paper
+
+Each PR counts once per CWE and can list several, so the shares don't add up to
+100%.
+
+## Usage
+
+```
+usage: top-cwes.py [-h] [--data-dir DATA_DIR] [--cwe-dir CWE_DIR] [--top TOP]
+
+options:
+  -h, --help           show this help message and exit
+  --data-dir DATA_DIR  Root directory of mined PR data (default: data).
+  --cwe-dir CWE_DIR    Root directory of the CWE catalog (default: cwes).
+  --top TOP            How many CWEs to show (default: 5).
+```
+
+# Language-to-Outcome Figure
+
+Generates the paper's Sankey figure, showing how PRs flow from their
+repository's language to their outcome: merged, closed without merging, or open.
+Dependabot PRs and PRs with no valid CWE are left out, so run
+`find-cwes-in-prs.py` first.
+
+<!-- language-figure:start -->
+<!-- language-figure:end -->
+
+Usage:
+```sh
+    python make-repo-figure.py [options]
+```
+
+This writes the figure to `figures/fig-language-outcome.tex` and prints the
+totals. If they're 0, check `--data-dir`. The paper's preamble needs
+`\usepackage{tikz}` (or `pgfplots`) and `graphicx`.
+
+Add `--svg` to also create an image and show it above. Commit `README.md` and
+`figures/` for it to appear on GitHub.
+
+## Usage
+
+```
+usage: make-repo-figure.py [-h] [--data-dir DATA_DIR] [--out OUT]
+                           [--svg [PATH]]
+
+options:
+  -h, --help           show this help message and exit
+  --data-dir DATA_DIR  Root directory of mined PR data (default: data).
+  --out OUT            Output .tex file (default: figures/fig-language-
+                       outcome.tex in the repo; the folder is created if
+                       missing).
+  --svg [PATH]         Also write an SVG image and show it in README.md
+                       (default path: figures/fig-language-outcome.svg in the
+                       repo).
+```
