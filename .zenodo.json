@@ -16,31 +16,38 @@
     "creators": [
         {
             "affiliation": "University of Nebraska-Lincoln",
-            "name": "Idriss Abdelmadjid"
+            "name": "Abdelmadjid, Idriss",
+            "orcid": "0009-0002-4930-4024"
         },
         {
             "affiliation": "University of Nebraska at Omaha",
-            "name": "Anup Gautam"
+            "name": "Gautam, Anup",
+            "orcid": ""
         },
         {
             "affiliation": "University of Nebraska-Lincoln",
-            "name": "Benjamin Grelk"
+            "name": "Grelk, Benjamin",
+            "orcid": ""
         },
         {
             "affiliation": "University of Nebraska at Omaha",
-            "name": "Jaydeb Sarker"
+            "name": "Sarker, Jaydeb",
+            "orcid": ""
         },
         {
             "affiliation": "University of Nebraska at Omaha",
-            "name": "Kshitiz Aryal"
+            "name": "Aryal, Kshitiz",
+            "orcid": ""
         },
         {
             "affiliation": "University of Nebraska at Omaha",
-            "name": "Harvey Siy"
+            "name": "Siy, Harvey",
+            "orcid": ""
         },
         {
             "affiliation": "University of Nebraska-Lincoln",
-            "name": "Robert Dyer"
+            "name": "Dyer, Robert",
+            "orcid": "0000-0001-9571-5567"
         }
     ],
     "access_right": "open",
