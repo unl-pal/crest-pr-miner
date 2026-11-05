@@ -177,9 +177,11 @@ def process_input_file(file_path: str, args: argparse.Namespace) -> None:
         raise e
     except Exception as e:
         print(f"Error running LLM: {str(e)}")
-        print(f"Continuing in {backoff} seconds")
-        backoff *= 2
-        time.sleep(backoff)
+        if not "input exceeds the context window of this model" in str(e):
+            if not "Invalid 'input[1].content': string too long" in str(e):
+                print(f"Continuing in {backoff} seconds")
+                backoff *= 2
+                time.sleep(backoff)
 
 
 if __name__ == "__main__":
