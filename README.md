@@ -130,22 +130,6 @@ Copy `.env.example` to `.env` and fill in:
 Then run the tools below in the order shown above. Note that GitHub data
 changes over time, so a new run will not match the released dataset exactly.
 
-## Citation
-
-If you use CREST, please cite:
-
-```bibtex
-@misc{crest-dataset,
-  author    = {Abdelmadjid, Idriss and Gautam, Anup and Grelk, Benjamin and
-               Sarker, Jaydeb and Aryal, Kshitiz and Siy, Harvey and Dyer, Robert},
-  title     = {{CREST}: A Dataset of {GitHub} Pull Requests Security Discussions},
-  year      = {2026},
-  publisher = {Zenodo},
-  doi       = {10.5281/zenodo.23670655},
-  url       = {https://doi.org/10.5281/zenodo.23670655}
-}
-```
-
 # Tools
 
 ## GitHub Pull Request Miner
