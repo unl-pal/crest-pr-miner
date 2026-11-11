@@ -3,6 +3,8 @@
 The dataset is available on Zenodo at
 [https://doi.org/10.5281/zenodo.23670655](https://doi.org/10.5281/zenodo.23670655).
 
+**NOTE: the unzip'd data is around 63GB.**
+
 CREST is a dataset of security-related code review discussions mined from
 GitHub pull requests (PRs) in C, C++, Java, and Python repositories. For each
 PR it includes the description, reviews, inline review comments, discussion
