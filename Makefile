@@ -23,7 +23,7 @@ package: package-replication package-data
 package-replication:
 	@$(CP) requirements.txt requirements.txt.save
 	@$(SED) 's/>=/==/g' requirements.txt.save > requirements.txt
-	-@$(ZIP) replication-pkg.zip $(ZIPOPTIONS) .env.example LICENSE Makefile README.md requirements.txt *.py *.sh llm-filtering/*.py llm-filtering/*.json llm-filtering/*.md sample.xlsx sample-judgments-human.csv $(ZIPIGNORES)
+	-@$(ZIP) replication-pkg.zip $(ZIPOPTIONS) .env.example .zenodo* bin/*.py LICENSE Makefile README.md requirements.txt *.py *.sh llm-filtering/*.py llm-filtering/*.json llm-filtering/*.md sample.xlsx sample-judgments-human.csv $(ZIPIGNORES)
 	@$(CP) requirements.txt.save requirements.txt
 	@$(RM) requirements.txt.save
 
