@@ -118,6 +118,8 @@ llm-filtering/prompt-template.md: The prompt used to classify PRs with the LLM
 Install the requirements:
 
 ```sh
+python3 -m venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -131,6 +133,18 @@ Then run the tools below in the order shown above. Note that GitHub data
 changes over time, so a new run will not match the released dataset exactly.
 
 # Tools
+
+To aid reproducibility, there are make targets:
+
+```sh
+python3 -m venv
+source .venv/bin/activate
+make mine-prs cwes cves filter
+```
+
+To regenerate a sample, run `make gen-sample`.
+
+To regenerate the data/figure in the paper, run `make top-cwes figure`.
 
 ## GitHub Pull Request Miner
 

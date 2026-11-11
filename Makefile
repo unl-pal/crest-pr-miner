@@ -35,6 +35,32 @@ zenodo:
 
 
 ################
+# study targets
+#
+.PHONY: mine-prs cwes cves filter
+mine-prs:
+	${PYTHON} pr-miner.py --diffs --reviews --comments --timeline --commits
+cwes:
+	${PYTHON} cwe-miner.py
+cves:
+	${PYTHON} find-cves-in-prs.py
+	${PYTHON} find-cwes-in-prs.py
+filter:
+	${PYTHON} move-dependabot.py
+	${PYTHON} filter-prs.py
+
+.PHONY: gen-sample
+gen-sample:
+	${PYTHON} generate-sample.py
+
+.PHONY: top-cwes figure
+top-cwes:
+	${PYTHON} top-cwes.py
+figure:
+	${PYTHON} make-repo-figure.py
+
+
+################
 # clean targets
 #
 .PHONY: clean clean-zip clean-all
