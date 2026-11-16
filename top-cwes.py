@@ -4,7 +4,7 @@ Count how many PRs list each CWE and print the most common ones.
 Skips Dependabot PRs and PRs with no valid CWE, same as make-repo-figure.py.
 
 Usage:
-    python top-cwes.py [--data-dir data] [--cwe-dir cwes] [--top 5]
+    python top-cwes.py [--data-dir data] [--cwe-dir cwes] [--top 5] [--groups groups.csv]
 """
 
 import argparse
@@ -17,8 +17,25 @@ DEPENDABOT = {"dependabot[bot]", "dependabot-preview[bot]"}
 CWE_TYPES = ["weakness", "category", "view"]
 
 
-def count_cwes(data_dir: Path) -> tuple[int, Counter, Counter, Counter]:
-    """Return (PRs kept, PRs per CWE, PRs mentioning it, PRs linking it via a CVE)."""
+def parse_groups(path: Path) -> list[list[str]]:
+    """Read a CSV where each row is a comma-separated list of CWE numbers."""
+    groups = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        members = [f"CWE-{token.strip().removeprefix('CWE-')}" for token in line.split(",") if token.strip()]
+        if members:
+            groups.append(members)
+    return groups
+
+
+def count_cwes(
+    data_dir: Path, groups: list[list[str]] | None = None
+) -> tuple[int, Counter, Counter, Counter, list[dict[str, int]]]:
+    """Return (PRs kept, PRs per CWE, PRs mentioning it, PRs linking it via a CVE, per-group counts)."""
+    groups = groups or []
+    group_counts = [{"total": 0, "mentioned": 0, "via_cves": 0} for _ in groups]
     kept = 0
     total: Counter[str] = Counter()
     mentioned: Counter[str] = Counter()
@@ -41,7 +58,16 @@ def count_cwes(data_dir: Path) -> tuple[int, Counter, Counter, Counter]:
                 mentioned[cwe] += 1
             if sources.get("via_cves"):
                 via_cves[cwe] += 1
-    return kept, total, mentioned, via_cves
+        for i, group in enumerate(groups):
+            present = [m for m in group if m in cwes]
+            if not present:
+                continue
+            group_counts[i]["total"] += 1
+            if any(cwes[m].get("mentioned") for m in present):
+                group_counts[i]["mentioned"] += 1
+            if any(cwes[m].get("via_cves") for m in present):
+                group_counts[i]["via_cves"] += 1
+    return kept, total, mentioned, via_cves, group_counts
 
 
 def cwe_name(cwe: str, cwe_dir: Path) -> str:
@@ -75,22 +101,36 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Root directory of mined PR data (default: data).")
     parser.add_argument("--cwe-dir", type=Path, default=Path("cwes"), help="Root directory of the CWE catalog (default: cwes).")
     parser.add_argument("--top", type=int, default=5, help="How many CWEs to show (default: 5).")
+    parser.add_argument("--groups", type=Path, help="CSV file where each row is a comma-separated group of CWEs to count together.")
     args = parser.parse_args()
 
-    kept, total, mentioned, via_cves = count_cwes(args.data_dir)
+    groups = parse_groups(args.groups) if args.groups else []
+    kept, total, mentioned, via_cves, group_counts = count_cwes(args.data_dir, groups)
     if not kept:
         sys.exit(f"No PRs with a valid CWE found under {args.data_dir}. Check --data-dir.")
 
-    # Sort by count, then by CWE ID, so ties always come out in the same order.
-    ranked = sorted(total.items(), key=lambda item: (-item[1], item[0]))[: args.top]
-    top = [(cwe, cwe_name(cwe, args.cwe_dir)) for cwe, _ in ranked]
+    # Each entry is (label, count, mentioned, via CVE, name). Groups join their members' names.
+    entries = [
+        (cwe, n, mentioned[cwe], via_cves[cwe], cwe_name(cwe, args.cwe_dir))
+        for cwe, n in total.items()
+    ]
+    for group, counts in zip(groups, group_counts):
+        label = "+".join(cwe.split("-")[-1] for cwe in group)
+        name = "; ".join(cwe_name(cwe, args.cwe_dir) for cwe in group)
+        entries.append((label, counts["total"], counts["mentioned"], counts["via_cves"], name))
+
+    # Sort by count, then by label, so ties always come out in the same order.
+    ranked = sorted(entries, key=lambda item: (-item[1], item[0]))[: args.top]
+    top = [(label, name) for label, _, _, _, name in ranked]
 
     print(f"PRs counted: {kept:,}")
     print(f"Distinct CWEs: {len(total):,}")
+    if groups:
+        print(f"Groups: {len(groups):,}")
     print()
-    print(f"{'Rank':>4}  {'CWE':<9} {'PRs':>7} {'Share':>6} {'Mentioned':>9} {'Via CVE':>8}  Name")
-    for rank, ((cwe, n), (_, name)) in enumerate(zip(ranked, top), 1):
-        print(f"{rank:>4}  {cwe:<9} {n:>7,} {n / kept:>6.1%} {mentioned[cwe]:>9,} {via_cves[cwe]:>8,}  {name}")
+    print(f"{'Rank':>4}  {'CWE':<28} {'PRs':>7} {'Share':>6} {'Mentioned':>9} {'Via CVE':>8}  Name")
+    for rank, (label, n, ment, via, name) in enumerate(ranked, 1):
+        print(f"{rank:>4}  {label:<28} {n:>7,} {n / kept:>6.1%} {ment:>9,} {via:>8,}  {name}")
     print()
     print(latex_sentence(top))
 
