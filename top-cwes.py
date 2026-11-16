@@ -102,6 +102,8 @@ def main():
     parser.add_argument("--cwe-dir", type=Path, default=Path("cwes"), help="Root directory of the CWE catalog (default: cwes).")
     parser.add_argument("--top", type=int, default=5, help="How many CWEs to show (default: 5).")
     parser.add_argument("--groups", type=Path, help="CSV file where each row is a comma-separated group of CWEs to count together.")
+    parser.add_argument("--no-name", action="store_true", help="Omit the Name column (and the LaTeX name sentence) from the output.")
+    parser.add_argument("--pillars", action="store_true", help="With --groups, label each group as P<pillar> (first member) instead of joining all member numbers.")
     args = parser.parse_args()
 
     groups = parse_groups(args.groups) if args.groups else []
@@ -111,12 +113,20 @@ def main():
 
     # Each entry is (label, count, mentioned, via CVE, name). Groups join their members' names.
     entries = [
-        (cwe, n, mentioned[cwe], via_cves[cwe], cwe_name(cwe, args.cwe_dir))
+        (cwe, n, mentioned[cwe], via_cves[cwe], cwe_name(cwe, args.cwe_dir) if not args.no_name else "")
         for cwe, n in total.items()
     ]
     for group, counts in zip(groups, group_counts):
-        label = "+".join(cwe.split("-")[-1] for cwe in group)
-        name = "; ".join(cwe_name(cwe, args.cwe_dir) for cwe in group)
+        if args.pillars:
+            label = f"P{group[0].split('-')[-1]}"
+        else:
+            label = "+".join(cwe.split("-")[-1] for cwe in group)
+        if args.no_name:
+            name = ""
+        elif args.pillars:
+            name = cwe_name(group[0], args.cwe_dir)
+        else:
+            name = "; ".join(cwe_name(cwe, args.cwe_dir) for cwe in group)
         entries.append((label, counts["total"], counts["mentioned"], counts["via_cves"], name))
 
     # Sort by count, then by label, so ties always come out in the same order.
@@ -128,11 +138,18 @@ def main():
     if groups:
         print(f"Groups: {len(groups):,}")
     print()
-    print(f"{'Rank':>4}  {'CWE':<28} {'PRs':>7} {'Share':>6} {'Mentioned':>9} {'Via CVE':>8}  Name")
+    header = f"{'Rank':>4}  {'CWE':<28} {'PRs':>7} {'Share':>6} {'Mentioned':>9} {'Via CVE':>8}"
+    if not args.no_name:
+        header += "  Name"
+    print(header)
     for rank, (label, n, ment, via, name) in enumerate(ranked, 1):
-        print(f"{rank:>4}  {label:<28} {n:>7,} {n / kept:>6.1%} {ment:>9,} {via:>8,}  {name}")
+        row = f"{rank:>4}  {label:<28} {n:>7,} {n / kept:>6.1%} {ment:>9,} {via:>8,}"
+        if not args.no_name:
+            row += f"  {name}"
+        print(row)
     print()
-    print(latex_sentence(top))
+    if not args.no_name:
+        print(latex_sentence(top))
 
 
 if __name__ == "__main__":
